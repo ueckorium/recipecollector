@@ -889,55 +889,70 @@ def _validate_recipe(recipe: Recipe) -> None:
         logger.warning(f"Recipe validation: {', '.join(warnings)}")
 
 
+def _escape_telegram_markdown(text: str) -> str:
+    """Escapes special characters for Telegram Markdown.
+
+    Telegram Markdown V1 uses: * _ ` [
+    We escape these to prevent parsing errors.
+    """
+    if not text:
+        return ""
+    # Escape backslashes first, then special chars
+    for char in ('\\', '*', '_', '`', '['):
+        text = text.replace(char, f'\\{char}')
+    return text
+
+
 def format_recipe_chat(recipe: Recipe) -> str:
-    """Formats a recipe for Telegram chat."""
-    lines = [f"*{recipe.title}*", ""]
+    """Formats a recipe for Telegram chat with proper Markdown escaping."""
+    esc = _escape_telegram_markdown
+
+    lines = [f"*{esc(recipe.title)}*", ""]
 
     # Meta line with all available info
     meta = []
     time_str = recipe.total_time or recipe.cook_time
     if time_str:
-        meta.append(f"⏱ {time_str}")
+        meta.append(f"⏱ {esc(time_str)}")
     if recipe.servings:
-        meta.append(f"👥 {recipe.servings}")
+        meta.append(f"👥 {esc(recipe.servings)}")
     if recipe.difficulty:
         difficulty_emoji = {"easy": "🟢", "medium": "🟡", "hard": "🔴"}.get(recipe.difficulty.lower(), "")
-        meta.append(f"{difficulty_emoji} {recipe.difficulty}")
+        meta.append(f"{difficulty_emoji} {esc(recipe.difficulty)}")
     if meta:
         lines.append(" | ".join(meta))
 
     if recipe.tags:
-        tags_str = " ".join(f"#{tag.replace(' ', '_')}" for tag in recipe.tags[:8])
+        tags_str = " ".join(f"#{esc(tag.replace(' ', '_'))}" for tag in recipe.tags[:8])
         lines.append(f"🏷 {tags_str}")
 
     lines.append("")
     lines.append("📋 *Ingredients:*")
     for ingredient in recipe.ingredients:
         if ingredient.startswith("## "):
-            lines.append(f"\n*{ingredient[3:]}*")
+            lines.append(f"\n*{esc(ingredient[3:])}*")
         else:
-            lines.append(f"• {ingredient}")
+            lines.append(f"• {esc(ingredient)}")
 
     lines.append("")
     lines.append("👨‍🍳 *Instructions:*")
     for i, step in enumerate(recipe.instructions, 1):
-        lines.append(f"{i}. {step}")
+        lines.append(f"{i}. {esc(step)}")
 
     if recipe.equipment:
         lines.append("")
-        lines.append(f"🍳 *Equipment:* {', '.join(recipe.equipment)}")
+        lines.append(f"🍳 *Equipment:* {esc(', '.join(recipe.equipment))}")
 
     if recipe.notes:
         lines.append("")
         lines.append("💡 *Tips:*")
         for note in recipe.notes:
-            lines.append(f"• {note}")
+            lines.append(f"• {esc(note)}")
 
     if recipe.source_url:
         lines.append("")
-        source_info = f"[Source]({recipe.source_url})"
-        if recipe.creator:
-            source_info = f"[{recipe.creator}]({recipe.source_url})"
+        creator_text = esc(recipe.creator) if recipe.creator else "Source"
+        source_info = f"[{creator_text}]({recipe.source_url})"
         lines.append(f"🔗 {source_info}")
 
     return "\n".join(lines)

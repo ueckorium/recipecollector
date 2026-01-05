@@ -227,7 +227,7 @@ def create_bot(config: Config) -> telebot.TeleBot:
             text,
             parse_mode="Markdown",
             reply_markup=markup,
-            disable_web_page_preview=True,
+            link_preview_options=types.LinkPreviewOptions(is_disabled=True),
         )
 
         # Auto-save if configured
