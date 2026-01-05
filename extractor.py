@@ -1,12 +1,18 @@
-"""Extrahiert Rezepte aus Medien mittels Gemini AI."""
+"""Extracts recipes from media using Gemini AI."""
 
+import ipaddress
 import json
 import logging
 import re
+import socket
 import subprocess
+import tempfile
+import time as time_module
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
+import PIL.Image
 import requests
 from bs4 import BeautifulSoup
 from google import genai
@@ -15,178 +21,204 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+
+# Timeouts (in seconds)
+TIMEOUT_WEBPAGE = 15
+TIMEOUT_METADATA = 60
+TIMEOUT_VIDEO_DOWNLOAD = 120
+
+# Text length limits
+MAX_WEBPAGE_TEXT = 6000
+MAX_FETCH_TEXT = 4000
+MIN_CONTENT_LENGTH = 100
+MIN_SUBTITLE_LENGTH = 20
+
+# HTTP session for connection reuse
+_http_session: requests.Session | None = None
+
+
+def _get_http_session() -> requests.Session:
+    """Returns a reusable HTTP session."""
+    global _http_session
+    if _http_session is None:
+        _http_session = requests.Session()
+        _http_session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+    return _http_session
+
+
+def _validate_and_resolve_url(url: str) -> tuple[bool, str | None, str | None]:
+    """
+    Validates URL against SSRF attacks and resolves DNS.
+
+    Returns:
+        Tuple of (is_valid, resolved_ip, hostname)
+        - is_valid: True if URL is safe
+        - resolved_ip: Resolved IP address (for DNS rebinding protection)
+        - hostname: Original hostname for Host header
+    """
+    try:
+        parsed = urlparse(url)
+
+        # Only allow HTTP(S)
+        if parsed.scheme not in ("http", "https"):
+            logger.warning(f"Invalid URL scheme: {parsed.scheme}")
+            return False, None, None
+
+        # Hostname must be present
+        if not parsed.hostname:
+            logger.warning("URL without hostname")
+            return False, None, None
+
+        hostname = parsed.hostname
+        hostname_lower = hostname.lower()
+
+        # Block localhost variants
+        blocked_hosts = ["localhost", "127.0.0.1", "0.0.0.0", "::1"]
+        if hostname_lower in blocked_hosts:
+            logger.warning(f"Blocked hostname: {hostname_lower}")
+            return False, None, None
+
+        # Resolve DNS and check IP
+        try:
+            resolved_ip = socket.gethostbyname(hostname)
+            ip_obj = ipaddress.ip_address(resolved_ip)
+
+            # Block private and reserved IP ranges
+            if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_reserved:
+                logger.warning(f"Private/reserved IP blocked: {resolved_ip}")
+                return False, None, None
+
+            # Block Link-Local (169.254.x.x - Cloud Metadata)
+            if ip_obj.is_link_local:
+                logger.warning(f"Link-Local IP blocked: {resolved_ip}")
+                return False, None, None
+
+        except socket.gaierror:
+            logger.warning(f"DNS resolution failed for: {hostname}")
+            return False, None, None
+
+        return True, resolved_ip, hostname
+
+    except Exception as e:
+        logger.warning(f"URL validation failed: {e}")
+        return False, None, None
+
+
+def _is_safe_url(url: str) -> bool:
+    """Validates URL against SSRF attacks (wrapper for compatibility)."""
+    is_valid, _, _ = _validate_and_resolve_url(url)
+    return is_valid
+
+
+def _safe_request(url: str, timeout: int = TIMEOUT_WEBPAGE) -> requests.Response:
+    """
+    Performs a secure HTTP request with DNS rebinding protection.
+
+    Resolves DNS once and uses the IP directly for the request,
+    to prevent DNS rebinding attacks.
+
+    Raises:
+        ValueError: For unsafe URL
+        requests.RequestException: For HTTP errors
+    """
+    is_valid, resolved_ip, hostname = _validate_and_resolve_url(url)
+
+    if not is_valid or not resolved_ip or not hostname:
+        raise ValueError(f"Unsafe URL blocked: {url}")
+
+    # Create URL with resolved IP (DNS rebinding protection)
+    parsed = urlparse(url)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    # Build URL with IP instead of hostname
+    if parsed.port:
+        ip_url = f"{parsed.scheme}://{resolved_ip}:{parsed.port}{parsed.path}"
+    else:
+        ip_url = f"{parsed.scheme}://{resolved_ip}{parsed.path}"
+
+    if parsed.query:
+        ip_url += f"?{parsed.query}"
+
+    session = _get_http_session()
+
+    # Request with correct Host header (for Virtual Hosts)
+    headers = {"Host": hostname if not parsed.port else f"{hostname}:{parsed.port}"}
+
+    response = session.get(ip_url, timeout=timeout, headers=headers, verify=True)
+    response.raise_for_status()
+
+    return response
+
+
+def _fetch_webpage_text(url: str, max_length: int = MAX_FETCH_TEXT) -> str | None:
+    """Fetches webpage content and extracts text (internal helper function)."""
+    try:
+        # SSRF protection with DNS rebinding protection
+        response = _safe_request(url, timeout=TIMEOUT_WEBPAGE)
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # Remove script/style
+        for tag in soup(["script", "style", "nav", "header", "footer"]):
+            tag.decompose()
+
+        # Extract text
+        text = soup.get_text(separator="\n", strip=True)
+
+        # Clean blank lines
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        text = "\n".join(lines)
+
+        # Limit length
+        if len(text) > max_length:
+            text = text[:max_length] + "..."
+
+        logger.info(f"Webpage fetched: {len(text)} characters")
+        return text
+
+    except Exception as e:
+        logger.warning(f"Could not fetch webpage: {e}")
+        return None
+
 
 # =============================================================================
-# DATENMODELL
+# DATA MODEL
 # =============================================================================
 
 @dataclass
 class VideoMetadata:
-    """Metadaten eines Videos von yt-dlp."""
+    """Video metadata from yt-dlp."""
     title: str | None = None
     description: str | None = None
     uploader: str | None = None
-    duration: int | None = None  # Sekunden
+    duration: int | None = None  # Seconds
     tags: list[str] = field(default_factory=list)
-    subtitles: str | None = None  # Extrahierter Untertitel-Text
+    subtitles: str | None = None  # Extracted subtitle text
     platform: str | None = None  # youtube, tiktok, instagram
 
 
 @dataclass
 class Recipe:
-    """Vollständiges Rezept mit allen extrahierten Informationen."""
+    """Complete recipe with all extracted information."""
     title: str
     servings: str | None = None
     prep_time: str | None = None
     cook_time: str | None = None
     total_time: str | None = None
-    difficulty: str | None = None  # einfach, mittel, schwer
+    difficulty: str | None = None  # easy, medium, hard
     tags: list[str] = field(default_factory=list)
     ingredients: list[str] = field(default_factory=list)
     instructions: list[str] = field(default_factory=list)
     equipment: list[str] = field(default_factory=list)
-    notes: list[str] = field(default_factory=list)  # Tipps, Variationen
+    notes: list[str] = field(default_factory=list)  # Tips, variations
     source_url: str | None = None
     source_platform: str | None = None  # tiktok, youtube, instagram, web
     creator: str | None = None
-
-
-IMAGE_PROMPT = """Erstelle ein appetitliches Food-Foto von diesem Gericht: {title}
-
-Anforderungen:
-- Professionelles Food-Fotografie-Styling
-- Das fertige Gericht auf einem schönen Teller/in einer Schüssel
-- Natürliches, warmes Licht
-- Leicht von oben fotografiert (45° Winkel)
-- Keine Personen, kein Text, keine Logos
-- Sauberer, einfacher Hintergrund (Holztisch oder neutral)
-"""
-
-
-def generate_recipe_image(config, recipe_title: str) -> bytes | None:
-    """Generiert ein Vorschaubild für das Rezept."""
-    try:
-        client = genai.Client(api_key=config.gemini.api_key)
-
-        prompt = IMAGE_PROMPT.format(title=recipe_title)
-
-        response = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
-            contents=[prompt],
-            config={"response_modalities": ["IMAGE", "TEXT"]},
-        )
-
-        # Bild aus Response extrahieren
-        for part in response.candidates[0].content.parts:
-            if hasattr(part, 'inline_data') and part.inline_data:
-                logger.info(f"Bild generiert für: {recipe_title}")
-                return part.inline_data.data
-
-        logger.warning("Kein Bild in Response gefunden")
-        return None
-
-    except Exception as e:
-        logger.warning(f"Bildgenerierung fehlgeschlagen: {e}")
-        return None
-
-
-def fetch_webpage_text(url: str) -> str | None:
-    """Ruft Webseiten-Inhalt ab und extrahiert den Text."""
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
-
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        # Entferne Script/Style
-        for tag in soup(["script", "style", "nav", "header", "footer"]):
-            tag.decompose()
-
-        # Extrahiere Text
-        text = soup.get_text(separator="\n", strip=True)
-
-        # Bereinige Leerzeilen
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        text = "\n".join(lines)
-
-        # Limitiere auf ~4000 Zeichen
-        if len(text) > 4000:
-            text = text[:4000] + "..."
-
-        logger.info(f"Webseite abgerufen: {len(text)} Zeichen")
-        return text
-
-    except Exception as e:
-        logger.warning(f"Konnte Webseite nicht abrufen: {e}")
-        return None
-
-EXTRACTION_PROMPT = """WICHTIG: Antworte KOMPLETT auf Deutsch! Alle Texte müssen auf Deutsch sein.
-
-Analysiere ALLE bereitgestellten Quellen und extrahiere das Rezept vollständig.
-
-QUELLEN-PRIORISIERUNG (bei Konflikten):
-1. Untertitel/Captions (genaueste Quelle für gesprochene Mengenangaben)
-2. Video-Beschreibung (oft vollständige Zutatenlisten)
-3. Video-Inhalt (visuelle Informationen)
-4. Webseiten-Text (Kontext)
-
-Antworte NUR mit einem JSON-Objekt in diesem Format:
-{
-  "title": "Name des Gerichts auf Deutsch",
-  "servings": "4 Portionen",
-  "prep_time": "15 min",
-  "cook_time": "30 min",
-  "total_time": "45 min",
-  "difficulty": "mittel",
-  "tags": ["italienisch", "pasta", "vegetarisch"],
-  "ingredients": [
-    "## Für die Sauce",
-    "200g Guanciale",
-    "4 Eigelb",
-    "## Für die Pasta",
-    "400g Spaghetti",
-    "Salz"
-  ],
-  "instructions": [
-    "Pasta in reichlich Salzwasser al dente kochen (ca. 8-10 min)",
-    "Guanciale in Würfel schneiden und bei mittlerer Hitze knusprig braten",
-    "Eigelb mit geriebenem Pecorino vermengen"
-  ],
-  "equipment": ["großer Topf", "Pfanne", "Reibe"],
-  "notes": ["Pancetta als Ersatz für Guanciale möglich", "Pastawasser aufheben zum Binden"]
-}
-
-WICHTIG - VOLLSTÄNDIGKEIT:
-- Extrahiere ALLE genannten Zutaten mit EXAKTEN Mengenangaben
-- Wenn Mengen genannt werden (gesprochen, geschrieben, eingeblendet), übernimm sie GENAU
-- Gruppenüberschriften bei Zutaten mit "## " markieren (z.B. "## Für den Teig")
-- Jeden Zubereitungsschritt einzeln und detailliert auflisten
-- Equipment nur auflisten wenn spezielle Geräte benötigt werden
-- Notes für Tipps, Variationen, Ersatzzutaten
-
-UMRECHNUNGEN:
-- Mengenangaben in metrischen Einheiten, Original in Klammern: "240ml (1 cup) Milch"
-- Temperaturen in Celsius mit Original: "180°C (350°F)"
-- "Pinch", "dash" etc. als "1 Prise" übersetzen
-
-SCHWIERIGKEITSGRAD:
-- "einfach": Wenige Zutaten, simple Techniken, unter 30 min
-- "mittel": Mehrere Schritte, etwas Erfahrung hilfreich
-- "schwer": Komplexe Techniken, viele Komponenten, zeitaufwändig
-
-ZEITEN:
-- prep_time: Aktive Vorbereitungszeit (Schneiden, Mischen)
-- cook_time: Zeit am Herd/Ofen
-- total_time: Gesamtzeit inkl. Ruhezeiten
-- Falls nur Gesamtzeit bekannt: nur total_time angeben
-
-REGELN:
-- ALLE Texte auf Deutsch
-- Fehlende Felder weglassen (nicht null oder leer)
-- NUR das JSON, kein anderer Text!"""
 
 
 def extract_recipe_from_video(
@@ -196,39 +228,37 @@ def extract_recipe_from_video(
     metadata: VideoMetadata | None = None,
 ) -> Recipe:
     """
-    Extrahiert ein Rezept direkt aus einem Video mittels Gemini.
-    Nutzt alle verfügbaren Metadaten für maximale Genauigkeit.
+    Extracts a recipe directly from a video using Gemini.
+    Uses all available metadata for maximum accuracy.
     """
-    import time as time_module
-
     client = genai.Client(api_key=config.gemini.api_key)
 
-    logger.info(f"Lade Video hoch: {video_path}")
+    logger.info(f"Uploading video: {video_path}")
     video_file = client.files.upload(file=str(video_path))
 
-    logger.info("Warte auf Verarbeitung...")
+    logger.info("Waiting for processing...")
     while video_file.state.name == "PROCESSING":
         time_module.sleep(2)
         video_file = client.files.get(name=video_file.name)
 
     if video_file.state.name == "FAILED":
-        raise ValueError("Video-Upload fehlgeschlagen")
+        raise ValueError("Video upload failed")
 
-    # Strukturierten Prompt mit allen verfügbaren Quellen bauen
-    prompt = EXTRACTION_PROMPT
+    # Build structured prompt with all available sources
+    prompt = config.prompts.extraction
     prompt += "\n\n" + "=" * 60
-    prompt += "\nVERFÜGBARE QUELLEN:"
+    prompt += "\nAVAILABLE SOURCES:"
     prompt += "\n" + "=" * 60
 
     if metadata:
         if metadata.subtitles:
-            prompt += f"\n\n### 1. UNTERTITEL/CAPTIONS (höchste Priorität für Mengenangaben!):\n{metadata.subtitles}"
+            prompt += f"\n\n### 1. SUBTITLES/CAPTIONS (highest priority for quantities!):\n{metadata.subtitles}"
 
         if metadata.description:
-            prompt += f"\n\n### 2. VIDEO-BESCHREIBUNG:\n{metadata.description}"
+            prompt += f"\n\n### 2. VIDEO DESCRIPTION:\n{metadata.description}"
 
         if metadata.title:
-            prompt += f"\n\n### 3. VIDEO-TITEL: {metadata.title}"
+            prompt += f"\n\n### 3. VIDEO TITLE: {metadata.title}"
 
         if metadata.uploader:
             prompt += f"\n### 4. CREATOR: {metadata.uploader}"
@@ -237,26 +267,26 @@ def extract_recipe_from_video(
             prompt += f"\n### 5. TAGS: {', '.join(metadata.tags[:10])}"
 
     if source_url:
-        prompt += f"\n\n### QUELL-URL: {source_url}"
+        prompt += f"\n\n### SOURCE URL: {source_url}"
 
     prompt += "\n\n" + "=" * 60
-    prompt += "\nAnalysiere nun das Video zusammen mit den obigen Quellen."
+    prompt += "\nNow analyze the video together with the sources above."
 
-    logger.info("Sende an Gemini zur Analyse...")
+    logger.info("Sending to Gemini for analysis...")
     response = client.models.generate_content(
         model=config.gemini.model,
         contents=[video_file, prompt],
     )
 
-    # Aufräumen
+    # Cleanup
     try:
         client.files.delete(name=video_file.name)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Could not delete temporary file: {e}")
 
     recipe = _parse_response(response.text, source_url)
 
-    # Metadaten zum Rezept hinzufügen
+    # Add metadata to recipe
     if metadata:
         recipe.source_platform = metadata.platform
         recipe.creator = metadata.uploader
@@ -265,7 +295,15 @@ def extract_recipe_from_video(
 
 
 def is_video_platform_url(url: str) -> bool:
-    """Prüft ob URL von einer Video-Plattform stammt."""
+    """
+    Checks if URL is from a supported video platform.
+
+    Args:
+        url: The URL to check.
+
+    Returns:
+        True if URL is from TikTok, Instagram, YouTube or Facebook.
+    """
     video_domains = [
         "tiktok.com",
         "vm.tiktok.com",
@@ -279,7 +317,15 @@ def is_video_platform_url(url: str) -> bool:
 
 
 def detect_platform(url: str) -> str | None:
-    """Erkennt die Video-Plattform aus der URL."""
+    """
+    Detects the video platform from URL.
+
+    Args:
+        url: The URL to analyze.
+
+    Returns:
+        Platform name ('tiktok', 'instagram', 'youtube', 'facebook') or None.
+    """
     url_lower = url.lower()
     if "tiktok.com" in url_lower:
         return "tiktok"
@@ -293,21 +339,27 @@ def detect_platform(url: str) -> str | None:
 
 
 def extract_video_metadata(url: str, temp_dir: Path) -> VideoMetadata:
-    """Extrahiert alle verfügbaren Metadaten von einem Video."""
+    """Extracts all available metadata from a video."""
     metadata = VideoMetadata(platform=detect_platform(url))
 
+    # URL validation before subprocess call
+    if not _is_safe_url(url):
+        logger.warning(f"Unsafe URL blocked for yt-dlp: {url}")
+        return metadata
+
     try:
-        # Metadaten als JSON extrahieren
+        # Extract metadata as JSON
         result = subprocess.run(
             [
                 "yt-dlp",
                 "--no-download",
                 "--dump-json",
+                "--",  # Argument injection protection
                 url,
             ],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=TIMEOUT_METADATA,
         )
 
         if result.returncode == 0 and result.stdout.strip():
@@ -318,16 +370,16 @@ def extract_video_metadata(url: str, temp_dir: Path) -> VideoMetadata:
             metadata.duration = data.get("duration")
             metadata.tags = data.get("tags", []) or []
 
-            logger.info(f"Metadaten extrahiert: {metadata.title}")
+            logger.info(f"Metadata extracted: {metadata.title}")
 
     except subprocess.TimeoutExpired:
-        logger.warning("Metadaten-Extraktion Timeout")
+        logger.warning("Metadata extraction timeout")
     except json.JSONDecodeError:
-        logger.warning("Konnte Metadaten-JSON nicht parsen")
+        logger.warning("Could not parse metadata JSON")
     except Exception as e:
-        logger.warning(f"Metadaten-Extraktion fehlgeschlagen: {e}")
+        logger.warning(f"Metadata extraction failed: {e}")
 
-    # Untertitel extrahieren (separat, da nicht immer verfügbar)
+    # Extract subtitles (separate, as not always available)
     try:
         subs_path = temp_dir / "subs"
         result = subprocess.run(
@@ -339,33 +391,34 @@ def extract_video_metadata(url: str, temp_dir: Path) -> VideoMetadata:
                 "--sub-lang", "de,en",
                 "--sub-format", "vtt/srt/best",
                 "-o", str(subs_path),
+                "--",  # Argument injection protection
                 url,
             ],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=TIMEOUT_METADATA,
         )
 
-        # Suche nach heruntergeladenen Untertitel-Dateien
+        # Search for downloaded subtitle files
         for ext in [".vtt", ".srt", ".de.vtt", ".en.vtt", ".de.srt", ".en.srt"]:
             sub_file = temp_dir / f"subs{ext}"
             if sub_file.exists():
                 raw_subs = sub_file.read_text(encoding="utf-8", errors="ignore")
                 metadata.subtitles = _clean_subtitles(raw_subs)
                 if metadata.subtitles:
-                    logger.info(f"Untertitel extrahiert: {len(metadata.subtitles)} Zeichen")
+                    logger.info(f"Subtitles extracted: {len(metadata.subtitles)} characters")
                 break
 
     except subprocess.TimeoutExpired:
-        logger.warning("Untertitel-Extraktion Timeout")
+        logger.warning("Subtitle extraction timeout")
     except Exception as e:
-        logger.warning(f"Untertitel-Extraktion fehlgeschlagen: {e}")
+        logger.warning(f"Subtitle extraction failed: {e}")
 
     return metadata
 
 
 def _clean_subtitles(raw_subs: str) -> str | None:
-    """Bereinigt VTT/SRT Untertitel zu lesbarem Text."""
+    """Cleans VTT/SRT subtitles to readable text."""
     if not raw_subs:
         return None
 
@@ -373,7 +426,7 @@ def _clean_subtitles(raw_subs: str) -> str | None:
     seen = set()
 
     for line in raw_subs.splitlines():
-        # Überspringe Timestamps, WEBVTT Header, leere Zeilen
+        # Skip timestamps, WEBVTT header, empty lines
         line = line.strip()
         if not line:
             continue
@@ -381,60 +434,66 @@ def _clean_subtitles(raw_subs: str) -> str | None:
             continue
         if re.match(r"^\d{2}:\d{2}", line):  # Timestamp
             continue
-        if re.match(r"^\d+$", line):  # Sequenznummer
+        if re.match(r"^\d+$", line):  # Sequence number
             continue
-        if "-->" in line:  # Timestamp-Range
+        if "-->" in line:  # Timestamp range
             continue
 
-        # Entferne VTT-Formatierung
+        # Remove VTT formatting
         line = re.sub(r"<[^>]+>", "", line)
         line = re.sub(r"\{[^}]+\}", "", line)
 
-        # Dedupliziere (Untertitel wiederholen sich oft)
+        # Deduplicate (subtitles often repeat)
         if line and line not in seen:
             seen.add(line)
             lines.append(line)
 
     text = " ".join(lines)
-    return text if len(text) > 20 else None
+    return text if len(text) > MIN_SUBTITLE_LENGTH else None
 
 
 def download_video_from_url(url: str, output_path: Path, temp_dir: Path) -> tuple[Path | None, VideoMetadata]:
-    """Lädt Video von URL mit yt-dlp herunter und extrahiert alle Metadaten."""
+    """Downloads video from URL with yt-dlp and extracts all metadata."""
 
-    # Erst alle Metadaten extrahieren
+    # URL validation before subprocess call
+    if not _is_safe_url(url):
+        logger.warning(f"Unsafe URL blocked for video download: {url}")
+        return None, VideoMetadata(platform=detect_platform(url))
+
+    # First extract all metadata
     metadata = extract_video_metadata(url, temp_dir)
 
     try:
-        # Video herunterladen
+        # Download video
         result = subprocess.run(
             [
                 "yt-dlp",
                 "-f", "best[ext=mp4]/best",
                 "--no-playlist",
                 "-o", str(output_path),
+                "--",  # Argument injection protection
                 url,
             ],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=TIMEOUT_VIDEO_DOWNLOAD,
         )
 
         if result.returncode == 0 and output_path.exists():
-            logger.info(f"Video heruntergeladen: {output_path} ({output_path.stat().st_size // 1024}KB)")
+            logger.info(f"Video downloaded: {output_path} ({output_path.stat().st_size // 1024}KB)")
             return output_path, metadata
 
-        logger.warning(f"yt-dlp Download-Fehler: {result.stderr}")
+        logger.warning(f"yt-dlp download error: {result.stderr}")
         return None, metadata
 
     except subprocess.TimeoutExpired:
-        logger.warning("Video-Download Timeout")
+        logger.warning("Video download timeout")
         return None, metadata
     except FileNotFoundError:
-        logger.warning("yt-dlp nicht installiert")
+        logger.warning("yt-dlp not installed")
         return None, metadata
     except Exception as e:
-        logger.warning(f"Video-Download fehlgeschlagen: {e}")
+        logger.warning(f"Video download failed: {e}")
         return None, metadata
 
 
@@ -444,29 +503,29 @@ def extract_recipe_from_metadata(
     source_url: str,
 ) -> Recipe:
     """
-    Extrahiert ein Rezept NUR aus Video-Metadaten (ohne Video).
-    Wird verwendet wenn Video-Download fehlschlägt aber Metadaten verfügbar sind.
+    Extracts a recipe ONLY from video metadata (without video).
+    Used when video download fails but metadata is available.
     """
     client = genai.Client(api_key=config.gemini.api_key)
 
-    # Strukturierten Prompt mit allen verfügbaren Quellen bauen
-    prompt = EXTRACTION_PROMPT
+    # Build structured prompt with all available sources
+    prompt = config.prompts.extraction
     prompt += "\n\n" + "=" * 60
-    prompt += "\nVERFÜGBARE QUELLEN (kein Video verfügbar, nur Text):"
+    prompt += "\nAVAILABLE SOURCES (no video available, text only):"
     prompt += "\n" + "=" * 60
 
     has_content = False
 
     if metadata.subtitles:
-        prompt += f"\n\n### 1. UNTERTITEL/CAPTIONS (höchste Priorität für Mengenangaben!):\n{metadata.subtitles}"
+        prompt += f"\n\n### 1. SUBTITLES/CAPTIONS (highest priority for quantities!):\n{metadata.subtitles}"
         has_content = True
 
     if metadata.description:
-        prompt += f"\n\n### 2. VIDEO-BESCHREIBUNG:\n{metadata.description}"
+        prompt += f"\n\n### 2. VIDEO DESCRIPTION:\n{metadata.description}"
         has_content = True
 
     if metadata.title:
-        prompt += f"\n\n### 3. VIDEO-TITEL: {metadata.title}"
+        prompt += f"\n\n### 3. VIDEO TITLE: {metadata.title}"
         has_content = True
 
     if metadata.uploader:
@@ -475,15 +534,15 @@ def extract_recipe_from_metadata(
     if metadata.tags:
         prompt += f"\n### 5. TAGS: {', '.join(metadata.tags[:10])}"
 
-    prompt += f"\n\n### QUELL-URL: {source_url}"
+    prompt += f"\n\n### SOURCE URL: {source_url}"
 
     if not has_content:
-        raise ValueError("Keine Metadaten verfügbar für Extraktion")
+        raise ValueError("No metadata available for extraction")
 
     prompt += "\n\n" + "=" * 60
-    prompt += "\nHINWEIS: Video konnte nicht heruntergeladen werden. Extrahiere das Rezept aus den obigen Text-Quellen."
+    prompt += "\nNOTE: Video could not be downloaded. Extract the recipe from the text sources above."
 
-    logger.info("Sende Metadaten an Gemini (ohne Video)...")
+    logger.info("Sending metadata to Gemini (without video)...")
     response = client.models.generate_content(
         model=config.gemini.model,
         contents=[prompt],
@@ -491,7 +550,7 @@ def extract_recipe_from_metadata(
 
     recipe = _parse_response(response.text, source_url)
 
-    # Metadaten zum Rezept hinzufügen
+    # Add metadata to recipe
     recipe.source_platform = metadata.platform
     recipe.creator = metadata.uploader
 
@@ -503,15 +562,13 @@ def extract_recipe_from_url(
     url: str,
 ) -> Recipe:
     """
-    Extrahiert ein Rezept aus einer URL.
-    Bei Video-Plattformen (TikTok, Instagram, YouTube) wird das Video heruntergeladen.
-    Fallback-Reihenfolge: Video > Metadaten > Webseite
+    Extracts a recipe from a URL.
+    For video platforms (TikTok, Instagram, YouTube) the video is downloaded.
+    Fallback order: Video > Metadata > Webpage
     """
-    import tempfile
-
-    # Bei Video-Plattformen: Video herunterladen und analysieren
+    # For video platforms: download and analyze video
     if is_video_platform_url(url):
-        logger.info(f"Video-Plattform erkannt, lade Video herunter: {url}")
+        logger.info(f"Video platform detected, downloading video: {url}")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -521,40 +578,40 @@ def extract_recipe_from_url(
             if downloaded:
                 return extract_recipe_from_video(config, downloaded, url, metadata)
 
-            # Video-Download fehlgeschlagen - aber haben wir Metadaten?
+            # Video download failed - but do we have metadata?
             if metadata and (metadata.description or metadata.subtitles or metadata.title):
-                logger.info("Video-Download fehlgeschlagen, verwende extrahierte Metadaten...")
+                logger.info("Video download failed, using extracted metadata...")
                 try:
                     return extract_recipe_from_metadata(config, metadata, url)
                 except Exception as e:
-                    logger.warning(f"Metadaten-Extraktion fehlgeschlagen: {e}")
+                    logger.warning(f"Metadata extraction failed: {e}")
 
-            logger.warning("Weder Video noch Metadaten verfügbar, versuche Webseiten-Text...")
+            logger.warning("Neither video nor metadata available, trying webpage text...")
 
-    # Webseiten-Extraktion: Erst Schema versuchen, dann Text
+    # Webpage extraction: Try schema first, then text
     return extract_recipe_from_webpage(config, url)
 
 
 def extract_recipe_schema(html: str) -> Recipe | None:
     """
-    Extrahiert Rezept aus JSON-LD Schema (schema.org/Recipe).
-    Viele Rezeptseiten haben perfekt strukturierte Daten!
+    Extracts recipe from JSON-LD Schema (schema.org/Recipe).
+    Many recipe sites have perfectly structured data!
     """
     soup = BeautifulSoup(html, "html.parser")
 
-    # Suche JSON-LD Scripts
+    # Search JSON-LD scripts
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(script.string)
 
-            # Kann ein einzelnes Objekt oder eine Liste sein
+            # Can be a single object or a list
             if isinstance(data, list):
                 for item in data:
                     recipe = _parse_schema_recipe(item)
                     if recipe:
                         return recipe
             else:
-                # Kann auch @graph enthalten
+                # Can also contain @graph
                 if "@graph" in data:
                     for item in data["@graph"]:
                         recipe = _parse_schema_recipe(item)
@@ -572,11 +629,11 @@ def extract_recipe_schema(html: str) -> Recipe | None:
 
 
 def _parse_schema_recipe(data: dict) -> Recipe | None:
-    """Parst ein einzelnes JSON-LD Recipe-Objekt."""
+    """Parses a single JSON-LD Recipe object."""
     if not isinstance(data, dict):
         return None
 
-    # Prüfe ob es ein Recipe ist
+    # Check if it's a Recipe
     schema_type = data.get("@type", "")
     if isinstance(schema_type, list):
         if "Recipe" not in schema_type:
@@ -584,18 +641,18 @@ def _parse_schema_recipe(data: dict) -> Recipe | None:
     elif schema_type != "Recipe":
         return None
 
-    # Extrahiere Felder
+    # Extract fields
     title = data.get("name", "")
     if not title:
         return None
 
-    # Zutaten
+    # Ingredients
     ingredients = []
     raw_ingredients = data.get("recipeIngredient", [])
     if isinstance(raw_ingredients, list):
         ingredients = [str(i).strip() for i in raw_ingredients if i]
 
-    # Anweisungen
+    # Instructions
     instructions = []
     raw_instructions = data.get("recipeInstructions", [])
     if isinstance(raw_instructions, list):
@@ -609,7 +666,7 @@ def _parse_schema_recipe(data: dict) -> Recipe | None:
     elif isinstance(raw_instructions, str):
         instructions = [s.strip() for s in raw_instructions.split("\n") if s.strip()]
 
-    # Zeiten parsen (ISO 8601 Duration: PT30M, PT1H30M, etc.)
+    # Parse times (ISO 8601 Duration: PT30M, PT1H30M, etc.)
     def parse_duration(iso_str: str | None) -> str | None:
         if not iso_str:
             return None
@@ -629,7 +686,7 @@ def _parse_schema_recipe(data: dict) -> Recipe | None:
     cook_time = parse_duration(data.get("cookTime"))
     total_time = parse_duration(data.get("totalTime"))
 
-    # Portionen
+    # Servings
     servings = None
     yield_val = data.get("recipeYield")
     if yield_val:
@@ -638,7 +695,7 @@ def _parse_schema_recipe(data: dict) -> Recipe | None:
         else:
             servings = str(yield_val)
 
-    # Tags/Kategorie
+    # Tags/Category
     tags = []
     if data.get("recipeCategory"):
         cat = data["recipeCategory"]
@@ -666,7 +723,7 @@ def _parse_schema_recipe(data: dict) -> Recipe | None:
         elif isinstance(author, str):
             creator = author
 
-    logger.info(f"Schema-Rezept gefunden: {title}")
+    logger.info(f"Schema recipe found: {title}")
 
     return Recipe(
         title=title,
@@ -674,7 +731,7 @@ def _parse_schema_recipe(data: dict) -> Recipe | None:
         prep_time=prep_time,
         cook_time=cook_time,
         total_time=total_time,
-        tags=tags[:10],  # Limitiere Tags
+        tags=tags[:10],  # Limit tags
         ingredients=ingredients,
         instructions=instructions,
         creator=creator,
@@ -684,28 +741,25 @@ def _parse_schema_recipe(data: dict) -> Recipe | None:
 
 def extract_recipe_from_webpage(config: Config, url: str) -> Recipe:
     """
-    Extrahiert ein Rezept aus einer Webseite.
-    Versucht zuerst JSON-LD Schema, dann Fallback auf Gemini.
+    Extracts a recipe from a webpage.
+    Tries JSON-LD Schema first, then falls back to Gemini.
     """
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
+        # SSRF protection with DNS rebinding protection
+        response = _safe_request(url, timeout=TIMEOUT_WEBPAGE)
         html = response.text
     except Exception as e:
-        raise ValueError(f"Konnte Webseite nicht abrufen: {e}")
+        raise ValueError(f"Could not fetch webpage: {e}")
 
-    # Erst Schema versuchen (viel genauer!)
+    # Try schema first (much more accurate!)
     recipe = extract_recipe_schema(html)
     if recipe:
         recipe.source_url = url
-        logger.info("Rezept aus Schema extrahiert (hohe Genauigkeit)")
+        logger.info("Recipe extracted from schema (high accuracy)")
         return recipe
 
-    # Fallback: Text extrahieren und an Gemini schicken
-    logger.info("Kein Schema gefunden, verwende Gemini...")
+    # Fallback: Extract text and send to Gemini
+    logger.info("No schema found, using Gemini...")
 
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "nav", "header", "footer"]):
@@ -715,19 +769,19 @@ def extract_recipe_from_webpage(config: Config, url: str) -> Recipe:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     text = "\n".join(lines)
 
-    if len(text) > 6000:
-        text = text[:6000] + "..."
+    if len(text) > MAX_WEBPAGE_TEXT:
+        text = text[:MAX_WEBPAGE_TEXT] + "..."
 
-    if len(text) < 100:
-        raise ValueError("Konnte keinen ausreichenden Inhalt von der Webseite abrufen")
+    if len(text) < MIN_CONTENT_LENGTH:
+        raise ValueError("Could not retrieve sufficient content from webpage")
 
     client = genai.Client(api_key=config.gemini.api_key)
 
-    prompt = EXTRACTION_PROMPT
-    prompt += f"\n\nQuell-URL: {url}"
-    prompt += f"\n\n--- Webseiten-Inhalt ---\n{text}"
+    prompt = config.prompts.extraction
+    prompt += f"\n\nSource URL: {url}"
+    prompt += f"\n\n--- Webpage Content ---\n{text}"
 
-    logger.info("Sende Webseiten-Text an Gemini...")
+    logger.info("Sending webpage text to Gemini...")
     response = client.models.generate_content(
         model=config.gemini.model,
         contents=[prompt],
@@ -744,24 +798,23 @@ def extract_recipe_from_image(
     source_url: str | None = None,
 ) -> Recipe:
     """
-    Extrahiert ein Rezept aus einem Bild mittels Gemini.
+    Extracts a recipe from an image using Gemini.
     """
     client = genai.Client(api_key=config.gemini.api_key)
 
-    # Bild laden
-    import PIL.Image
+    # Load image
     image = PIL.Image.open(image_path)
 
-    prompt = EXTRACTION_PROMPT
+    prompt = config.prompts.extraction
 
-    # Webseiten-Inhalt abrufen falls URL vorhanden
+    # Fetch webpage content if URL provided
     if source_url:
-        prompt += f"\n\nQuell-URL: {source_url}"
-        webpage_text = fetch_webpage_text(source_url)
+        prompt += f"\n\nSource URL: {source_url}"
+        webpage_text = _fetch_webpage_text(source_url)
         if webpage_text:
-            prompt += f"\n\n--- Webseiten-Inhalt ---\n{webpage_text}"
+            prompt += f"\n\n--- Webpage Content ---\n{webpage_text}"
 
-    logger.info("Sende Bild an Gemini...")
+    logger.info("Sending image to Gemini...")
     response = client.models.generate_content(
         model=config.gemini.model,
         contents=[image, prompt],
@@ -771,10 +824,10 @@ def extract_recipe_from_image(
 
 
 def _parse_response(response_text: str, source_url: str | None) -> Recipe:
-    """Parst die Gemini-Antwort zu einem Recipe-Objekt."""
+    """Parses the Gemini response to a Recipe object."""
     response_text = response_text.strip()
 
-    # Extrahiere JSON aus Response (entferne evtl. Markdown-Codeblocks)
+    # Extract JSON from response (remove potential markdown code blocks)
     if "```" in response_text:
         match = re.search(r"```(?:json)?\s*(.*?)\s*```", response_text, re.DOTALL)
         if match:
@@ -783,16 +836,16 @@ def _parse_response(response_text: str, source_url: str | None) -> Recipe:
     try:
         data = json.loads(response_text)
     except json.JSONDecodeError as e:
-        logger.error(f"Konnte JSON nicht parsen: {response_text[:500]}")
-        raise ValueError(f"Gemini hat kein valides JSON zurückgegeben: {e}")
+        logger.error(f"Could not parse JSON: {response_text[:500]}")
+        raise ValueError(f"Gemini did not return valid JSON: {e}")
 
-    # Validiere und erstelle Recipe
+    # Validate and create Recipe
     recipe = Recipe(
-        title=data.get("title", "Unbekanntes Rezept"),
+        title=data.get("title", "Unknown Recipe"),
         servings=data.get("servings"),
         prep_time=data.get("prep_time"),
         cook_time=data.get("cook_time"),
-        total_time=data.get("total_time") or data.get("time"),  # Fallback für altes Format
+        total_time=data.get("total_time") or data.get("time"),  # Fallback for old format
         difficulty=data.get("difficulty"),
         tags=data.get("tags", []),
         ingredients=data.get("ingredients", []),
@@ -802,45 +855,45 @@ def _parse_response(response_text: str, source_url: str | None) -> Recipe:
         source_url=source_url,
     )
 
-    # Validierung
+    # Validation
     _validate_recipe(recipe)
 
     return recipe
 
 
 def _validate_recipe(recipe: Recipe) -> None:
-    """Validiert ein Rezept und loggt Warnungen bei Problemen."""
+    """Validates a recipe and logs warnings for issues."""
     warnings = []
 
-    if not recipe.title or recipe.title == "Unbekanntes Rezept":
-        warnings.append("Kein Titel gefunden")
+    if not recipe.title or recipe.title == "Unknown Recipe":
+        warnings.append("No title found")
 
     if not recipe.ingredients:
-        warnings.append("Keine Zutaten gefunden")
+        warnings.append("No ingredients found")
 
     if not recipe.instructions:
-        warnings.append("Keine Zubereitungsschritte gefunden")
+        warnings.append("No instructions found")
 
-    # Prüfe auf offensichtlich fehlende Mengenangaben
+    # Check for obviously missing quantities
     ingredients_without_amounts = 0
     for ing in recipe.ingredients:
-        if not ing.startswith("## "):  # Ignoriere Gruppenüberschriften
-            # Hat keine Zahl am Anfang
+        if not ing.startswith("## "):  # Ignore group headers
+            # Has no number at the start
             if not re.match(r"^\d", ing.strip()):
                 ingredients_without_amounts += 1
 
     if ingredients_without_amounts > len(recipe.ingredients) * 0.7:
-        warnings.append(f"{ingredients_without_amounts} Zutaten ohne Mengenangabe")
+        warnings.append(f"{ingredients_without_amounts} ingredients without quantities")
 
     if warnings:
-        logger.warning(f"Rezept-Validierung: {', '.join(warnings)}")
+        logger.warning(f"Recipe validation: {', '.join(warnings)}")
 
 
 def format_recipe_chat(recipe: Recipe) -> str:
-    """Formatiert ein Rezept für Telegram Chat."""
-    lines = [f"🍽 *{recipe.title}*", ""]
+    """Formats a recipe for Telegram chat."""
+    lines = [f"*{recipe.title}*", ""]
 
-    # Meta-Zeile mit allen verfügbaren Infos
+    # Meta line with all available info
     meta = []
     time_str = recipe.total_time or recipe.cook_time
     if time_str:
@@ -848,7 +901,7 @@ def format_recipe_chat(recipe: Recipe) -> str:
     if recipe.servings:
         meta.append(f"👥 {recipe.servings}")
     if recipe.difficulty:
-        difficulty_emoji = {"einfach": "🟢", "mittel": "🟡", "schwer": "🔴"}.get(recipe.difficulty.lower(), "")
+        difficulty_emoji = {"easy": "🟢", "medium": "🟡", "hard": "🔴"}.get(recipe.difficulty.lower(), "")
         meta.append(f"{difficulty_emoji} {recipe.difficulty}")
     if meta:
         lines.append(" | ".join(meta))
@@ -858,7 +911,7 @@ def format_recipe_chat(recipe: Recipe) -> str:
         lines.append(f"🏷 {tags_str}")
 
     lines.append("")
-    lines.append("📋 *Zutaten:*")
+    lines.append("📋 *Ingredients:*")
     for ingredient in recipe.ingredients:
         if ingredient.startswith("## "):
             lines.append(f"\n*{ingredient[3:]}*")
@@ -866,7 +919,7 @@ def format_recipe_chat(recipe: Recipe) -> str:
             lines.append(f"• {ingredient}")
 
     lines.append("")
-    lines.append("👨‍🍳 *Zubereitung:*")
+    lines.append("👨‍🍳 *Instructions:*")
     for i, step in enumerate(recipe.instructions, 1):
         lines.append(f"{i}. {step}")
 
@@ -876,13 +929,13 @@ def format_recipe_chat(recipe: Recipe) -> str:
 
     if recipe.notes:
         lines.append("")
-        lines.append("💡 *Tipps:*")
+        lines.append("💡 *Tips:*")
         for note in recipe.notes:
             lines.append(f"• {note}")
 
     if recipe.source_url:
         lines.append("")
-        source_info = f"[Quelle]({recipe.source_url})"
+        source_info = f"[Source]({recipe.source_url})"
         if recipe.creator:
             source_info = f"[{recipe.creator}]({recipe.source_url})"
         lines.append(f"🔗 {source_info}")
@@ -891,32 +944,32 @@ def format_recipe_chat(recipe: Recipe) -> str:
 
 
 def format_recipe_markdown(recipe: Recipe) -> str:
-    """Formatiert ein Rezept als Markdown für Obsidian."""
+    """Formats a recipe as Markdown for Obsidian."""
     lines = []
 
-    # Meta-Block
+    # Meta block
     meta_parts = []
     if recipe.source_url:
         source_text = recipe.creator or recipe.source_url.split("/")[2]
-        meta_parts.append(f"**Quelle:** [{source_text}]({recipe.source_url})")
+        meta_parts.append(f"**Source:** [{source_text}]({recipe.source_url})")
     if recipe.servings:
-        meta_parts.append(f"**Portionen:** {recipe.servings}")
+        meta_parts.append(f"**Servings:** {recipe.servings}")
 
-    # Zeiten
+    # Times
     times = []
     if recipe.prep_time:
-        times.append(f"Vorbereitung: {recipe.prep_time}")
+        times.append(f"Prep: {recipe.prep_time}")
     if recipe.cook_time:
-        times.append(f"Kochen: {recipe.cook_time}")
+        times.append(f"Cook: {recipe.cook_time}")
     if recipe.total_time:
-        times.append(f"Gesamt: {recipe.total_time}")
+        times.append(f"Total: {recipe.total_time}")
     elif not times and (recipe.prep_time or recipe.cook_time):
-        pass  # Keine Gesamtzeit nötig wenn einzelne Zeiten vorhanden
+        pass  # No total time needed if individual times present
     if times:
-        meta_parts.append(f"**Zeit:** {' | '.join(times)}")
+        meta_parts.append(f"**Time:** {' | '.join(times)}")
 
     if recipe.difficulty:
-        meta_parts.append(f"**Schwierigkeit:** {recipe.difficulty}")
+        meta_parts.append(f"**Difficulty:** {recipe.difficulty}")
 
     if recipe.tags:
         tags_str = " ".join(f"#{tag.replace(' ', '-')}" for tag in recipe.tags)
@@ -925,8 +978,8 @@ def format_recipe_markdown(recipe: Recipe) -> str:
     lines.extend(meta_parts)
     lines.append("")
 
-    # Zutaten
-    lines.append("## Zutaten")
+    # Ingredients
+    lines.append("## Ingredients")
     lines.append("")
     for ingredient in recipe.ingredients:
         if ingredient.startswith("## "):
@@ -936,14 +989,14 @@ def format_recipe_markdown(recipe: Recipe) -> str:
             lines.append(f"- {ingredient}")
     lines.append("")
 
-    # Zubereitung
-    lines.append("## Zubereitung")
+    # Instructions
+    lines.append("## Instructions")
     lines.append("")
     for i, step in enumerate(recipe.instructions, 1):
         lines.append(f"{i}. {step}")
     lines.append("")
 
-    # Equipment (falls vorhanden)
+    # Equipment (if present)
     if recipe.equipment:
         lines.append("## Equipment")
         lines.append("")
@@ -951,9 +1004,9 @@ def format_recipe_markdown(recipe: Recipe) -> str:
             lines.append(f"- {item}")
         lines.append("")
 
-    # Tipps/Notizen (falls vorhanden)
+    # Tips/Notes (if present)
     if recipe.notes:
-        lines.append("## Tipps")
+        lines.append("## Tips")
         lines.append("")
         for note in recipe.notes:
             lines.append(f"- {note}")

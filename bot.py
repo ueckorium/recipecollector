@@ -3,10 +3,14 @@
 
 import io
 import logging
+import os
 import re
 import sys
 import tempfile
+import uuid
+from collections import OrderedDict
 from pathlib import Path
+from urllib.parse import urlparse
 
 import telebot
 from telebot import types
@@ -21,47 +25,147 @@ from extractor import (
     format_recipe_markdown,
 )
 
-# Logging - DEBUG für ausführliche Ausgabe
+
+class LRUCache(OrderedDict):
+    """Simple LRU cache with maximum size."""
+
+    def __init__(self, maxsize: int = 500):
+        super().__init__()
+        self.maxsize = maxsize
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        self.move_to_end(key)
+        return value
+
+    def __setitem__(self, key, value):
+        if key in self:
+            self.move_to_end(key)
+        super().__setitem__(key, value)
+        if len(self) > self.maxsize:
+            oldest = next(iter(self))
+            del self[oldest]
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+# Logging - level configurable via environment variable (default: INFO)
+_log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=getattr(logging, _log_level, logging.INFO),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
 
-# Speicher für Rezepte (für Callback-Buttons)
-recipe_cache: dict = {}
+# Storage for recipes (for callback buttons) - LRU cache prevents memory leak
+recipe_cache: LRUCache[str, Recipe] = LRUCache(maxsize=500)
 
+
+# =============================================================================
+# HELPER FUNCTIONS (independent of bot instance)
+# =============================================================================
+
+def sanitize_filename(text: str) -> str:
+    """Makes text filesystem-safe but human-readable."""
+    text = re.sub(r'[<>:"/\\|?*]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text[:80]
+
+
+def is_valid_url(url: str) -> bool:
+    """Checks if a URL is valid (HTTP/HTTPS with hostname)."""
+    try:
+        parsed = urlparse(url)
+        return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    except Exception:
+        return False
+
+
+def extract_url_from_caption(caption: str | None) -> str | None:
+    """Extracts and validates a URL from caption text."""
+    if not caption:
+        return None
+    url_match = re.search(r'https?://[^\s]+', caption)
+    if url_match:
+        url = url_match.group(0).rstrip(".,;:!?)")
+        return url if is_valid_url(url) else None
+    return None
+
+
+def save_recipe_to_file(recipe: Recipe, storage_path: Path) -> Path:
+    """Saves a recipe as markdown file with unique name."""
+    storage_path.mkdir(parents=True, exist_ok=True)
+
+    base_name = sanitize_filename(recipe.title)
+    md_filename = f"{base_name}.md"
+    md_path = storage_path / md_filename
+
+    if md_path.exists():
+        unique_id = str(uuid.uuid4())[:8]
+        md_filename = f"{base_name}-{unique_id}.md"
+        md_path = storage_path / md_filename
+
+    markdown = format_recipe_markdown(recipe)
+    md_path.write_text(markdown, encoding="utf-8")
+    return md_path
+
+
+# =============================================================================
+# BOT FACTORY
+# =============================================================================
 
 def create_bot(config: Config) -> telebot.TeleBot:
-    """Erstellt und konfiguriert den Bot."""
+    """Creates and configures the bot."""
 
     bot = telebot.TeleBot(config.telegram.bot_token)
-    telebot.logger.setLevel(logging.DEBUG)
+    telebot.logger.setLevel(getattr(logging, _log_level, logging.INFO))
 
     def is_user_allowed(user_id: int) -> bool:
         if not config.telegram.allowed_users:
             return True
         return user_id in config.telegram.allowed_users
 
-    def sanitize_filename(text: str) -> str:
-        """Macht Text filesystem-safe aber human-readable."""
-        # Entferne ungültige Zeichen für Dateinamen
-        text = re.sub(r'[<>:"/\\|?*]', '', text)
-        # Mehrfache Leerzeichen zu einem
-        text = re.sub(r'\s+', ' ', text).strip()
-        return text[:80]
+    def authorized_handler(handler_name: str):
+        """Decorator for handlers with user authorization and logging."""
+        def decorator(func):
+            def wrapper(message: types.Message):
+                user_id = message.from_user.id
+                logger.info(f"{handler_name} from user {user_id}")
+                if not is_user_allowed(user_id):
+                    logger.warning(f"User {user_id} not authorized")
+                    return
+                return func(message)
+            return wrapper
+        return decorator
+
+    def safe_delete_message(chat_id: int, message_id: int) -> None:
+        """Safely deletes a message (ignores errors if already deleted)."""
+        try:
+            bot.delete_message(chat_id, message_id)
+        except telebot.apihelper.ApiTelegramException:
+            pass  # Message no longer exists
+
+    def safe_edit_message(text: str, chat_id: int, message_id: int) -> None:
+        """Safely edits a message (ignores errors)."""
+        try:
+            bot.edit_message_text(text, chat_id, message_id)
+        except telebot.apihelper.ApiTelegramException:
+            pass  # Message no longer exists or text unchanged
 
     def create_recipe_buttons(recipe_id: str) -> types.InlineKeyboardMarkup:
         markup = types.InlineKeyboardMarkup(row_width=2)
         btn_markdown = types.InlineKeyboardButton(
-            "📄 Als Markdown",
+            "📄 As Markdown",
             callback_data=f"md:{recipe_id}"
         )
         buttons = [btn_markdown]
         if config.storage.enabled:
             btn_save = types.InlineKeyboardButton(
-                "💾 Speichern",
+                "💾 Save",
                 callback_data=f"save:{recipe_id}"
             )
             buttons.append(btn_save)
@@ -69,7 +173,7 @@ def create_bot(config: Config) -> telebot.TeleBot:
         return markup
 
     def send_recipe(message: types.Message, recipe: Recipe):
-        """Sendet ein formatiertes Rezept."""
+        """Sends a formatted recipe."""
         recipe_id = f"{message.chat.id}_{message.message_id}"
         recipe_cache[recipe_id] = recipe
 
@@ -84,96 +188,78 @@ def create_bot(config: Config) -> telebot.TeleBot:
             disable_web_page_preview=True,
         )
 
-        # Automatisch speichern falls konfiguriert
+        # Auto-save if configured
         if config.storage.enabled and config.storage.path:
             try:
-                config.storage.path.mkdir(parents=True, exist_ok=True)
-
-                base_name = sanitize_filename(recipe.title)
-                md_filename = f"{base_name}.md"
-                md_path = config.storage.path / md_filename
-
-                counter = 1
-                while md_path.exists():
-                    base_name = f"{sanitize_filename(recipe.title)}-{counter}"
-                    md_filename = f"{base_name}.md"
-                    md_path = config.storage.path / md_filename
-                    counter += 1
-
-                markdown = format_recipe_markdown(recipe)
-                md_path.write_text(markdown, encoding="utf-8")
-                logger.info(f"Rezept automatisch gespeichert: {md_path}")
-
+                md_path = save_recipe_to_file(recipe, config.storage.path)
+                logger.info(f"Recipe auto-saved: {md_path}")
             except Exception as e:
-                logger.exception("Fehler beim automatischen Speichern")
+                logger.exception("Error during auto-save")
 
-    # === Handler ===
+    # === Handlers ===
 
     @bot.message_handler(commands=["start", "help"])
     def handle_start(message: types.Message):
-        logger.debug(f"Start/Help von User {message.from_user.id}")
+        logger.debug(f"Start/Help from user {message.from_user.id}")
         if not is_user_allowed(message.from_user.id):
-            bot.reply_to(message, "⛔ Du bist nicht berechtigt, diesen Bot zu nutzen.")
+            bot.reply_to(message, "⛔ You are not authorized to use this bot.")
             return
 
         help_text = """🍽 *Recipe Collector Bot*
 
-Sende mir ein Rezept-Video oder einen Link, und ich extrahiere das Rezept für dich!
+Send me a recipe video or link, and I'll extract the recipe for you!
 
-*Unterstützt:*
-• 📹 Videos (direkt senden)
-• 📷 Bilder/Screenshots
+*Supported:*
+• 📹 Videos (send directly)
+• 📷 Images/Screenshots
 
-*Befehle:*
-/start - Diese Hilfe anzeigen
-/id - Deine User-ID anzeigen
+*Commands:*
+/start - Show this help
+/id - Show your user ID
 """
         bot.send_message(message.chat.id, help_text, parse_mode="Markdown")
 
     @bot.message_handler(commands=["id"])
     def handle_id(message: types.Message):
-        logger.debug(f"ID-Anfrage von User {message.from_user.id}")
-        bot.reply_to(message, f"Deine User-ID: `{message.from_user.id}`", parse_mode="Markdown")
+        logger.debug(f"ID request from user {message.from_user.id}")
+        bot.reply_to(message, f"Your user ID: `{message.from_user.id}`", parse_mode="Markdown")
 
     @bot.message_handler(func=lambda m: m.text and re.search(r'https?://[^\s]+', m.text))
+    @authorized_handler("URL received")
     def handle_url(message: types.Message):
-        logger.info(f"URL empfangen von User {message.from_user.id}")
-        if not is_user_allowed(message.from_user.id):
-            return
-
         url_match = re.search(r'https?://[^\s]+', message.text)
         if not url_match:
             return
 
-        url = url_match.group(0)
-        status = bot.reply_to(message, "⏳ Lade Webseite...")
-
-        try:
-            bot.edit_message_text("⏳ Analysiere Rezept...", message.chat.id, status.message_id)
-            recipe = extract_recipe_from_url(config, url)
-
-            logger.info(f"Rezept extrahiert: {recipe.title}")
-            bot.delete_message(message.chat.id, status.message_id)
-            send_recipe(message, recipe)
-
-        except Exception as e:
-            logger.exception("Fehler bei URL-Verarbeitung")
-            bot.edit_message_text(f"❌ Fehler: {e}", message.chat.id, status.message_id)
-
-    @bot.message_handler(content_types=["video", "video_note", "animation"])
-    def handle_video(message: types.Message):
-        logger.info(f"Video empfangen von User {message.from_user.id}")
-        if not is_user_allowed(message.from_user.id):
-            logger.warning(f"User {message.from_user.id} nicht erlaubt")
+        url = url_match.group(0).rstrip(".,;:!?)")  # Remove punctuation
+        if not is_valid_url(url):
+            bot.reply_to(message, "❌ Invalid URL.")
             return
 
-        status = bot.reply_to(message, "⏳ Verarbeite Video...")
+        status = bot.reply_to(message, "⏳ Loading webpage...")
+
+        try:
+            safe_edit_message("⏳ Analyzing recipe...", message.chat.id, status.message_id)
+            recipe = extract_recipe_from_url(config, url)
+
+            logger.info(f"Recipe extracted: {recipe.title}")
+            safe_delete_message(message.chat.id, status.message_id)
+            send_recipe(message, recipe)
+
+        except Exception:
+            logger.exception("Error processing URL")
+            safe_edit_message("❌ Processing failed. Please try again.", message.chat.id, status.message_id)
+
+    @bot.message_handler(content_types=["video", "video_note", "animation"])
+    @authorized_handler("Video received")
+    def handle_video(message: types.Message):
+        status = bot.reply_to(message, "⏳ Processing video...")
 
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_path = Path(temp_dir)
 
-                # Video herunterladen
+                # Download video
                 if message.video:
                     file_info = bot.get_file(message.video.file_id)
                 elif message.video_note:
@@ -181,39 +267,31 @@ Sende mir ein Rezept-Video oder einen Link, und ich extrahiere das Rezept für d
                 else:
                     file_info = bot.get_file(message.animation.file_id)
 
-                logger.debug(f"Lade Video herunter: {file_info.file_path}")
+                logger.debug(f"Downloading video: {file_info.file_path}")
                 downloaded = bot.download_file(file_info.file_path)
                 video_path = temp_path / "video.mp4"
                 video_path.write_bytes(downloaded)
-                logger.debug(f"Video gespeichert: {video_path} ({video_path.stat().st_size} bytes)")
+                logger.debug(f"Video saved: {video_path} ({video_path.stat().st_size} bytes)")
 
-                # URL aus Caption
-                source_url = None
-                if message.caption:
-                    import re
-                    url_match = re.search(r'https?://[^\s]+', message.caption)
-                    if url_match:
-                        source_url = url_match.group(0)
+                # URL from caption
+                source_url = extract_url_from_caption(message.caption)
 
-                # Direkt an Gemini schicken
-                bot.edit_message_text("⏳ Analysiere Video...", message.chat.id, status.message_id)
+                # Send directly to Gemini
+                safe_edit_message("⏳ Analyzing video...", message.chat.id, status.message_id)
                 recipe = extract_recipe_from_video(config, video_path, source_url)
 
-                logger.info(f"Rezept extrahiert: {recipe.title}")
-                bot.delete_message(message.chat.id, status.message_id)
+                logger.info(f"Recipe extracted: {recipe.title}")
+                safe_delete_message(message.chat.id, status.message_id)
                 send_recipe(message, recipe)
 
-        except Exception as e:
-            logger.exception("Fehler bei Video-Verarbeitung")
-            bot.edit_message_text(f"❌ Fehler: {e}", message.chat.id, status.message_id)
+        except Exception:
+            logger.exception("Error processing video")
+            safe_edit_message("❌ Video processing failed. Please try again.", message.chat.id, status.message_id)
 
     @bot.message_handler(content_types=["photo"])
+    @authorized_handler("Photo received")
     def handle_photo(message: types.Message):
-        logger.info(f"Foto empfangen von User {message.from_user.id}")
-        if not is_user_allowed(message.from_user.id):
-            return
-
-        status = bot.reply_to(message, "⏳ Verarbeite Bild...")
+        status = bot.reply_to(message, "⏳ Processing image...")
 
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -221,37 +299,29 @@ Sende mir ein Rezept-Video oder einen Link, und ich extrahiere das Rezept für d
 
                 photo = message.photo[-1]
                 file_info = bot.get_file(photo.file_id)
-                logger.debug(f"Lade Bild herunter: {file_info.file_path}")
+                logger.debug(f"Downloading image: {file_info.file_path}")
                 downloaded = bot.download_file(file_info.file_path)
 
                 image_path = temp_path / "image.jpg"
                 image_path.write_bytes(downloaded)
 
-                # URL aus Caption
-                source_url = None
-                if message.caption:
-                    import re
-                    url_match = re.search(r'https?://[^\s]+', message.caption)
-                    if url_match:
-                        source_url = url_match.group(0)
+                # URL from caption
+                source_url = extract_url_from_caption(message.caption)
 
-                bot.edit_message_text("⏳ Analysiere Bild...", message.chat.id, status.message_id)
+                safe_edit_message("⏳ Analyzing image...", message.chat.id, status.message_id)
                 recipe = extract_recipe_from_image(config, image_path, source_url)
 
-                logger.info(f"Rezept extrahiert: {recipe.title}")
-                bot.delete_message(message.chat.id, status.message_id)
+                logger.info(f"Recipe extracted: {recipe.title}")
+                safe_delete_message(message.chat.id, status.message_id)
                 send_recipe(message, recipe)
 
-        except Exception as e:
-            logger.exception("Fehler bei Bild-Verarbeitung")
-            bot.edit_message_text(f"❌ Fehler: {e}", message.chat.id, status.message_id)
+        except Exception:
+            logger.exception("Error processing image")
+            safe_edit_message("❌ Image processing failed. Please try again.", message.chat.id, status.message_id)
 
     @bot.message_handler(content_types=["document"])
+    @authorized_handler("Document received")
     def handle_document(message: types.Message):
-        logger.info(f"Dokument empfangen von User {message.from_user.id}")
-        if not is_user_allowed(message.from_user.id):
-            return
-
         doc = message.document
         if not doc.mime_type:
             return
@@ -260,10 +330,10 @@ Sende mir ein Rezept-Video oder einen Link, und ich extrahiere das Rezept für d
         is_image = doc.mime_type.startswith("image/")
 
         if not (is_video or is_image):
-            bot.reply_to(message, "❌ Bitte sende ein Video oder Bild.")
+            bot.reply_to(message, "❌ Please send a video or image.")
             return
 
-        status = bot.reply_to(message, "⏳ Verarbeite Datei...")
+        status = bot.reply_to(message, "⏳ Processing file...")
 
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -272,40 +342,38 @@ Sende mir ein Rezept-Video oder einen Link, und ich extrahiere das Rezept für d
                 file_info = bot.get_file(doc.file_id)
                 downloaded = bot.download_file(file_info.file_path)
 
-                file_path = temp_path / doc.file_name
+                # Path traversal protection: basename + sanitize for complete protection
+                raw_name = os.path.basename(doc.file_name) if doc.file_name else "document"
+                safe_filename = sanitize_filename(raw_name) or "document"
+                file_path = temp_path / safe_filename
                 file_path.write_bytes(downloaded)
 
-                # URL aus Caption
-                source_url = None
-                if message.caption:
-                    import re
-                    url_match = re.search(r'https?://[^\s]+', message.caption)
-                    if url_match:
-                        source_url = url_match.group(0)
+                # URL from caption
+                source_url = extract_url_from_caption(message.caption)
 
-                bot.edit_message_text("⏳ Analysiere...", message.chat.id, status.message_id)
+                safe_edit_message("⏳ Analyzing...", message.chat.id, status.message_id)
 
                 if is_video:
                     recipe = extract_recipe_from_video(config, file_path, source_url)
                 else:
                     recipe = extract_recipe_from_image(config, file_path, source_url)
 
-                logger.info(f"Rezept extrahiert: {recipe.title}")
-                bot.delete_message(message.chat.id, status.message_id)
+                logger.info(f"Recipe extracted: {recipe.title}")
+                safe_delete_message(message.chat.id, status.message_id)
                 send_recipe(message, recipe)
 
-        except Exception as e:
-            logger.exception("Fehler bei Dokument-Verarbeitung")
-            bot.edit_message_text(f"❌ Fehler: {e}", message.chat.id, status.message_id)
+        except Exception:
+            logger.exception("Error processing document")
+            safe_edit_message("❌ Document processing failed. Please try again.", message.chat.id, status.message_id)
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith("md:"))
     def handle_markdown_callback(call: types.CallbackQuery):
-        logger.debug(f"Markdown-Button geklickt: {call.data}")
+        logger.debug(f"Markdown button clicked: {call.data}")
         recipe_id = call.data[3:]
         recipe = recipe_cache.get(recipe_id)
 
         if not recipe:
-            bot.answer_callback_query(call.id, "❌ Rezept nicht mehr verfügbar")
+            bot.answer_callback_query(call.id, "❌ Recipe no longer available")
             return
 
         base_name = sanitize_filename(recipe.title)
@@ -314,79 +382,64 @@ Sende mir ein Rezept-Video oder einen Link, und ich extrahiere das Rezept für d
         md_file.name = f"{base_name}.md"
 
         bot.send_document(call.message.chat.id, md_file, caption=f"📄 {recipe.title}")
-        bot.answer_callback_query(call.id, "✅ Markdown gesendet")
+        bot.answer_callback_query(call.id, "✅ Markdown sent")
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith("save:"))
     def handle_save_callback(call: types.CallbackQuery):
-        logger.debug(f"Speichern-Button geklickt: {call.data}")
+        logger.debug(f"Save button clicked: {call.data}")
         if not config.storage.enabled or not config.storage.path:
-            bot.answer_callback_query(call.id, "❌ Speichern nicht konfiguriert")
+            bot.answer_callback_query(call.id, "❌ Saving not configured")
             return
 
         recipe_id = call.data[5:]
         recipe = recipe_cache.get(recipe_id)
 
         if not recipe:
-            bot.answer_callback_query(call.id, "❌ Rezept nicht mehr verfügbar")
+            bot.answer_callback_query(call.id, "❌ Recipe no longer available")
             return
 
         try:
-            config.storage.path.mkdir(parents=True, exist_ok=True)
+            md_path = save_recipe_to_file(recipe, config.storage.path)
+            bot.answer_callback_query(call.id, f"✅ Saved: {md_path.name}")
+            logger.info(f"Recipe saved: {md_path}")
 
-            base_name = sanitize_filename(recipe.title)
-            md_filename = f"{base_name}.md"
-            md_path = config.storage.path / md_filename
-
-            counter = 1
-            while md_path.exists():
-                base_name = f"{sanitize_filename(recipe.title)}-{counter}"
-                md_filename = f"{base_name}.md"
-                md_path = config.storage.path / md_filename
-                counter += 1
-
-            markdown = format_recipe_markdown(recipe)
-            md_path.write_text(markdown, encoding="utf-8")
-
-            bot.answer_callback_query(call.id, f"✅ Gespeichert: {md_filename}")
-            logger.info(f"Rezept gespeichert: {md_path}")
-
-        except Exception as e:
-            logger.exception("Fehler beim Speichern")
-            bot.answer_callback_query(call.id, f"❌ Fehler: {e}")
+        except Exception:
+            logger.exception("Error saving")
+            bot.answer_callback_query(call.id, "❌ Save failed")
 
     return bot
 
 
 def main():
-    logger.info("Recipe Collector Bot startet...")
+    logger.info("Recipe Collector Bot starting...")
 
     try:
         config = load_config()
     except FileNotFoundError:
-        logger.error("config.yaml nicht gefunden! Kopiere config.yaml.example nach config.yaml")
+        logger.error("config.yaml not found! Copy config.yaml.example to config.yaml")
         sys.exit(1)
 
     if not config.telegram.bot_token:
-        logger.error("Kein Bot-Token konfiguriert!")
+        logger.error("No bot token configured!")
         sys.exit(1)
 
     if not config.gemini.api_key:
-        logger.error("Kein Gemini API-Key konfiguriert!")
+        logger.error("No Gemini API key configured!")
         sys.exit(1)
 
-    logger.info("Konfiguration geladen")
+    logger.info("Configuration loaded")
 
     if config.telegram.allowed_users:
-        logger.info(f"Erlaubte User: {config.telegram.allowed_users}")
+        logger.info(f"Allowed users: {config.telegram.allowed_users}")
     else:
-        logger.warning("WARNUNG: Keine User-Whitelist - jeder kann den Bot nutzen!")
+        logger.warning("WARNING: No user whitelist - anyone can use the bot!")
 
     if config.storage.enabled:
-        logger.info(f"Speicherort: {config.storage.path}")
+        logger.info(f"Storage path: {config.storage.path}")
 
     bot = create_bot(config)
 
-    logger.info("Bot gestartet! Warte auf Nachrichten...")
+    logger.info("Bot started! Waiting for messages...")
     bot.infinity_polling()
 
 

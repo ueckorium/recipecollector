@@ -1,0 +1,93 @@
+# Recipe Collector Bot - Konfiguration
+# Kopiere diese Datei nach config.yaml und passe die Werte an
+
+telegram:
+  # Bot-Token von @BotFather
+  bot_token: ${TELEGRAM_BOT_TOKEN}
+
+  # Nur diese User-IDs dürfen den Bot nutzen
+  # Eigene ID herausfinden: Schreibe @userinfobot auf Telegram
+  # Leer lassen = JEDER kann den Bot nutzen (nicht empfohlen!)
+  allowed_users:
+    - 123456789
+
+gemini:
+  # API Key von https://aistudio.google.com/app/apikey
+  api_key: ${GEMINI_API_KEY}
+  # gemini-1.5-flash ist günstiger und reicht für Rezepte
+  model: gemini-1.5-flash
+
+# Optional: Rezepte lokal speichern
+storage:
+  enabled: false
+  # Pfad zum Obsidian Vault Rezepte-Ordner
+  path: /path/to/obsidian/vault/Rezepte
+
+prompts:
+  extraction: |
+    WICHTIG: Antworte KOMPLETT auf Deutsch! Alle Texte müssen auf Deutsch sein.
+
+    Analysiere ALLE bereitgestellten Quellen und extrahiere das Rezept vollständig.
+
+    QUELLEN-PRIORISIERUNG (bei Konflikten):
+    1. Untertitel/Captions (genaueste Quelle für gesprochene Mengenangaben)
+    2. Video-Beschreibung (oft vollständige Zutatenlisten)
+    3. Video-Inhalt (visuelle Informationen)
+    4. Webseiten-Text (Kontext)
+
+    Antworte NUR mit einem JSON-Objekt in diesem Format:
+    {
+      "title": "Name des Gerichts auf Deutsch",
+      "servings": "4 Portionen",
+      "prep_time": "15 min",
+      "cook_time": "30 min",
+      "total_time": "45 min",
+      "difficulty": "mittel",
+      "tags": ["italienisch", "pasta", "vegetarisch"],
+      "ingredients": [
+        "## Für die Sauce",
+        "200g Guanciale",
+        "4 Eigelb",
+        "## Für die Pasta",
+        "400g Spaghetti",
+        "Salz"
+      ],
+      "instructions": [
+        "Pasta in reichlich Salzwasser al dente kochen (ca. 8-10 min)",
+        "Guanciale in Würfel schneiden und bei mittlerer Hitze knusprig braten",
+        "Eigelb mit geriebenem Pecorino vermengen"
+      ],
+      "equipment": ["großer Topf", "Pfanne", "Reibe"],
+      "notes": ["Pancetta als Ersatz für Guanciale möglich", "Pastawasser aufheben zum Binden"]
+    }
+
+    WICHTIG - VOLLSTÄNDIGKEIT:
+    - Extrahiere ALLE genannten Zutaten mit EXAKTEN Mengenangaben
+    - Wenn Mengen genannt werden (gesprochen, geschrieben, eingeblendet), übernimm sie GENAU
+    - Gruppenüberschriften bei Zutaten mit "## " markieren (z.B. "## Für den Teig")
+    - Jeden Zubereitungsschritt einzeln und detailliert auflisten
+    - Equipment nur auflisten wenn spezielle Geräte benötigt werden
+    - Notes für Tipps, Variationen, Ersatzzutaten
+
+    UMRECHNUNGEN:
+    - Mengenangaben in metrischen Einheiten, Original in Klammern: "240ml (1 cup) Milch"
+    - Temperaturen in Celsius mit Original: "180°C (350°F)"
+    - "Pinch", "dash" etc. als "1 Prise" übersetzen
+
+    SCHWIERIGKEITSGRAD:
+    - "einfach": Wenige Zutaten, simple Techniken, unter 30 min
+    - "mittel": Mehrere Schritte, etwas Erfahrung hilfreich
+    - "schwer": Komplexe Techniken, viele Komponenten, zeitaufwändig
+
+    ZEITEN:
+    - prep_time: Aktive Vorbereitungszeit (Schneiden, Mischen)
+    - cook_time: Zeit am Herd/Ofen
+    - total_time: Gesamtzeit inkl. Ruhezeiten
+    - Falls nur Gesamtzeit bekannt: nur total_time angeben
+
+    REGELN:
+    - ALLE Texte auf Deutsch
+    - Fehlende Felder weglassen (nicht null oder leer)
+    - NUR das JSON, kein anderer Text!
+
+

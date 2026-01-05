@@ -1,24 +1,32 @@
-# Recipe Collector Bot - Konfiguration
-# Kopiere diese Datei nach config.yaml und passe die Werte an
+# Recipe Collector Bot - Configuration
+# Copy this file to config.yaml and adjust the values
 
 telegram:
-  # Bot-Token von @BotFather
+  # Bot token from @BotFather
   bot_token: ${TELEGRAM_BOT_TOKEN}
 
-  # Nur diese User-IDs dürfen den Bot nutzen
-  # Eigene ID herausfinden: Schreibe @userinfobot auf Telegram
-  # Leer lassen = JEDER kann den Bot nutzen (nicht empfohlen!)
+  # Only these user IDs may use the bot
+  # Find your ID: Message @userinfobot on Telegram
+  # Leave empty = ANYONE can use the bot (not recommended!)
   allowed_users:
     - 123456789
 
 gemini:
-  # API Key von https://aistudio.google.com/app/apikey
+  # API Key from https://aistudio.google.com/app/apikey
   api_key: ${GEMINI_API_KEY}
-  # gemini-1.5-flash ist günstiger und reicht für Rezepte
-  model: gemini-1.5-flash
+  # gemini-2.0-flash is cheaper and sufficient for recipes
+  model: gemini-2.0-flash
 
-# Optional: Rezepte lokal speichern
+# Optional: Save recipes locally
 storage:
   enabled: false
-  # Pfad zum Obsidian Vault Rezepte-Ordner
-  path: /path/to/obsidian/vault/Rezepte
+  # Path to Obsidian vault recipes folder
+  path: /path/to/obsidian/vault/Recipes
+
+# Optional: Custom prompts (default is English)
+# prompts:
+#   extraction: |
+#     Analyze the sources and extract the recipe.
+#     Respond ONLY with a JSON object...
+#
+#     (Full prompt see config.py DEFAULT_EXTRACTION_PROMPT)
