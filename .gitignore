@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Config mit Secrets
+config.yaml
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# Temp
+*.tmp
+*.log
