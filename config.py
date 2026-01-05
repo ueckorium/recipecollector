@@ -1,10 +1,13 @@
 """Configuration management for Recipe Collector Bot."""
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -23,6 +26,11 @@ class GeminiConfig:
 class StorageConfig:
     enabled: bool = False
     path: Path | None = None
+
+
+@dataclass
+class OutputConfig:
+    format: str = "markdown"  # "markdown" or "cooklang"
 
 
 # Default prompt for recipe extraction
@@ -100,6 +108,7 @@ class Config:
     gemini: GeminiConfig
     storage: StorageConfig
     prompts: PromptsConfig = field(default_factory=PromptsConfig)
+    output: OutputConfig = field(default_factory=OutputConfig)
 
 
 def _expand_env(value: str) -> str:
@@ -153,4 +162,11 @@ def load_config(config_path: Path | None = None) -> Config:
         extraction=prompts_raw.get("extraction", DEFAULT_EXTRACTION_PROMPT),
     )
 
-    return Config(telegram=telegram, gemini=gemini, storage=storage, prompts=prompts)
+    output_raw = raw.get("output", {})
+    output_format = output_raw.get("format", "markdown").lower()
+    if output_format not in ("markdown", "cooklang"):
+        logger.warning(f"Invalid output format '{output_format}', defaulting to 'markdown'")
+        output_format = "markdown"
+    output = OutputConfig(format=output_format)
+
+    return Config(telegram=telegram, gemini=gemini, storage=storage, prompts=prompts, output=output)

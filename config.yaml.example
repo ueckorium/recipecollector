@@ -23,6 +23,12 @@ storage:
   # Path to Obsidian vault recipes folder
   path: /path/to/obsidian/vault/Recipes
 
+# Output format for recipes
+output:
+  # "markdown" = Standard Markdown (.md) for Obsidian
+  # "cooklang" = Cooklang format (.cook) for Cooklang apps/Obsidian plugin
+  format: markdown
+
 # Optional: Custom prompts (default is English)
 # prompts:
 #   extraction: |

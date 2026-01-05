@@ -9,7 +9,7 @@ A Telegram bot that extracts cooking recipes from videos and images. Simply send
 - **Video Analysis**: Extracts recipes from videos (TikTok, Instagram, YouTube, etc.)
 - **Image Recognition**: Also works with screenshots and photos
 - **Instant Feedback**: Response directly in Telegram chat
-- **Markdown Export**: Download as `.md` file for Obsidian
+- **Multiple Formats**: Export as Markdown (`.md`) or Cooklang (`.cook`)
 - **Local Storage**: Optionally save directly to Obsidian vault
 - **Cross-Platform**: Works on Android, iOS, Desktop, Web
 - **Self-Hosted**: Runs on your own server/NAS
@@ -98,6 +98,10 @@ gemini:
 storage:
   enabled: false
   path: /path/to/obsidian/vault/Recipes
+
+# Output format
+output:
+  format: markdown  # or "cooklang"
 ```
 
 ### Environment Variables
@@ -143,8 +147,61 @@ export GEMINI_API_KEY="AIza..."
 
 After each recipe, buttons appear:
 
-- **📄 As Markdown**: Sends the recipe as `.md` file for download
+- **📄 As Markdown** / **📄 As Cooklang**: Sends the recipe as file for download (format depends on config)
 - **💾 Save**: Saves to Obsidian vault (if configured)
+
+### Output Formats
+
+The bot supports two output formats, configurable via `output.format`:
+
+#### Markdown (default)
+
+Standard Markdown format (`.md`), optimized for Obsidian:
+
+```markdown
+**Source:** [Creator](https://example.com)
+**Servings:** 4 servings
+**Time:** Prep: 15 min | Cook: 30 min
+
+## Ingredients
+
+- 400g Spaghetti
+- 200g Guanciale
+
+## Instructions
+
+1. Cook pasta in salted water
+2. Fry guanciale until crispy
+```
+
+#### Cooklang
+
+[Cooklang](https://cooklang.org/) format (`.cook`) for use with Cooklang apps or the Obsidian Cooklang plugin:
+
+```
+>> source: https://example.com
+>> servings: 4 servings
+>> total time: 45 min
+>> tags: italian, pasta
+
+-- Ingredients --
+
+-- @Spaghetti{400%g}
+-- @Guanciale{200%g}
+
+-- Instructions --
+
+Cook @pasta{} in salted water.
+
+Fry @guanciale{} until crispy.
+```
+
+To enable Cooklang output:
+
+```yaml
+output:
+  format: cooklang
+```
 
 ## Extraction Logic
 

@@ -943,6 +943,126 @@ def format_recipe_chat(recipe: Recipe) -> str:
     return "\n".join(lines)
 
 
+def format_recipe_cooklang(recipe: Recipe) -> str:
+    """Formats a recipe in Cooklang format (.cook)."""
+    lines = []
+
+    # Metadata as >> key: value
+    metadata_fields = [
+        ("source", recipe.source_url),
+        ("author", recipe.creator),
+        ("servings", recipe.servings),
+        ("prep time", recipe.prep_time),
+        ("cook time", recipe.cook_time),
+        ("total time", recipe.total_time),
+        ("difficulty", recipe.difficulty),
+        ("tags", ", ".join(recipe.tags) if recipe.tags else None),
+    ]
+
+    for key, value in metadata_fields:
+        if value:
+            lines.append(f">> {key}: {value}")
+
+    if lines:
+        lines.append("")
+
+    # Ingredients section as reference (Cooklang convention)
+    if recipe.ingredients:
+        lines.append("-- Ingredients --")
+        lines.append("")
+        for ingredient in recipe.ingredients:
+            if ingredient.startswith("## "):
+                # Group header as section
+                lines.append(f"== {ingredient[3:]} ==")
+            else:
+                # Parse ingredient: try to extract amount and unit
+                cooklang_ing = _convert_ingredient_to_cooklang(ingredient)
+                lines.append(f"-- {cooklang_ing}")
+        lines.append("")
+
+    # Instructions
+    if recipe.instructions:
+        lines.append("-- Instructions --")
+        lines.append("")
+        # Sort equipment by length (longest first) to avoid partial matches
+        sorted_equipment = sorted(recipe.equipment or [], key=len, reverse=True)
+        for step in recipe.instructions:
+            modified_step = step
+            for equip in sorted_equipment:
+                # Only replace if not already marked up
+                if equip.lower() in modified_step.lower() and f"#{equip.lower()}" not in modified_step.lower():
+                    modified_step = re.sub(
+                        rf"\b({re.escape(equip)})\b",
+                        r"#\1{}",
+                        modified_step,
+                        flags=re.IGNORECASE,
+                        count=1
+                    )
+            lines.append(modified_step)
+            lines.append("")
+
+    # Equipment as separate section
+    if recipe.equipment:
+        lines.append("-- Equipment --")
+        for item in (recipe.equipment or []):
+            lines.append(f"-- #{item}{{}}")
+        lines.append("")
+
+    # Tips/Notes as comments
+    if recipe.notes:
+        lines.append("-- Tips --")
+        for note in recipe.notes:
+            lines.append(f"-- {note}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _convert_ingredient_to_cooklang(ingredient: str) -> str:
+    """Converts an ingredient string to Cooklang @ingredient{amount%unit} format.
+
+    Handles various formats:
+    - "200g Mehl" -> @Mehl{200%g}
+    - "2 EL Öl" -> @Öl{2%EL}
+    - "1/2 TL Salz" -> @Salz{1/2%TL}
+    - "200-250g Butter" -> @Butter{200-250%g}
+    - "1 1/2 cups Milch" -> @Milch{1 1/2%cups}
+    - "Salz" -> @Salz{}
+    """
+    ingredient = ingredient.strip()
+
+    # Limit length to prevent ReDoS attacks
+    if len(ingredient) > 200:
+        return f"@{ingredient[:50]}...{{}}"
+
+    # Skip group headers
+    if ingredient.startswith("## "):
+        return ingredient
+
+    # Pattern with more specific matching to prevent catastrophic backtracking:
+    # - Amount: digits with optional decimal/fraction, optional range
+    # - Unit: single word (letters only)
+    # - Name: everything else
+    match = re.match(
+        r'^([\d.,/]+(?:\s*-\s*[\d.,/]+)?(?:\s+[\d/]+)?)\s*([a-zA-ZäöüÄÖÜß]+)?\s+(.+)$',
+        ingredient
+    )
+
+    if match:
+        amount = match.group(1).strip().replace(',', '.')
+        unit = match.group(2) or ""
+        name = match.group(3).strip()
+
+        # Validate we have an actual ingredient name
+        if name:
+            if unit:
+                return f"@{name}{{{amount}%{unit}}}"
+            return f"@{name}{{{amount}}}"
+
+    # No amount found - just use ingredient name
+    return f"@{ingredient}{{}}"
+
+
 def format_recipe_markdown(recipe: Recipe) -> str:
     """Formats a recipe as Markdown for Obsidian."""
     lines = []

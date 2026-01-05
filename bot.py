@@ -23,7 +23,33 @@ from extractor import (
     extract_recipe_from_url,
     format_recipe_chat,
     format_recipe_markdown,
+    format_recipe_cooklang,
 )
+
+
+class FormattedRecipe:
+    """Container for formatted recipe output."""
+    __slots__ = ('content', 'extension', 'format_name')
+
+    def __init__(self, content: str, extension: str, format_name: str):
+        self.content = content
+        self.extension = extension
+        self.format_name = format_name
+
+
+def format_recipe_by_type(recipe: Recipe, output_format: str) -> FormattedRecipe:
+    """Formats a recipe based on output format type."""
+    if output_format == "cooklang":
+        return FormattedRecipe(
+            content=format_recipe_cooklang(recipe),
+            extension=".cook",
+            format_name="Cooklang"
+        )
+    return FormattedRecipe(
+        content=format_recipe_markdown(recipe),
+        extension=".md",
+        format_name="Markdown"
+    )
 
 
 class LRUCache(OrderedDict):
@@ -73,7 +99,8 @@ def sanitize_filename(text: str) -> str:
     """Makes text filesystem-safe but human-readable."""
     text = re.sub(r'[<>:"/\\|?*]', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
-    return text[:80]
+    result = text[:80]
+    return result if result else "untitled-recipe"
 
 
 def is_valid_url(url: str) -> bool:
@@ -96,22 +123,35 @@ def extract_url_from_caption(caption: str | None) -> str | None:
     return None
 
 
-def save_recipe_to_file(recipe: Recipe, storage_path: Path) -> Path:
-    """Saves a recipe as markdown file with unique name."""
+def save_recipe_to_file(recipe: Recipe, storage_path: Path, output_format: str = "markdown") -> Path:
+    """Saves a recipe as markdown or cooklang file with unique name.
+
+    Uses exclusive file creation to prevent race conditions.
+    """
     storage_path.mkdir(parents=True, exist_ok=True)
 
+    formatted = format_recipe_by_type(recipe, output_format)
     base_name = sanitize_filename(recipe.title)
-    md_filename = f"{base_name}.md"
-    md_path = storage_path / md_filename
 
-    if md_path.exists():
-        unique_id = str(uuid.uuid4())[:8]
-        md_filename = f"{base_name}-{unique_id}.md"
-        md_path = storage_path / md_filename
+    # Try to create file exclusively to prevent race conditions
+    for attempt in range(10):
+        if attempt == 0:
+            filename = f"{base_name}{formatted.extension}"
+        else:
+            unique_id = str(uuid.uuid4())[:8]
+            filename = f"{base_name}-{unique_id}{formatted.extension}"
 
-    markdown = format_recipe_markdown(recipe)
-    md_path.write_text(markdown, encoding="utf-8")
-    return md_path
+        file_path = storage_path / filename
+        try:
+            # O_EXCL fails if file exists - prevents TOCTOU race condition
+            fd = os.open(str(file_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(formatted.content)
+            return file_path
+        except FileExistsError:
+            continue
+
+    raise RuntimeError(f"Could not create unique filename for: {base_name}")
 
 
 # =============================================================================
@@ -158,11 +198,13 @@ def create_bot(config: Config) -> telebot.TeleBot:
 
     def create_recipe_buttons(recipe_id: str) -> types.InlineKeyboardMarkup:
         markup = types.InlineKeyboardMarkup(row_width=2)
-        btn_markdown = types.InlineKeyboardButton(
-            "📄 As Markdown",
-            callback_data=f"md:{recipe_id}"
+        # Button label based on output format
+        format_label = "📄 As Cooklang" if config.output.format == "cooklang" else "📄 As Markdown"
+        btn_format = types.InlineKeyboardButton(
+            format_label,
+            callback_data=f"file:{recipe_id}"
         )
-        buttons = [btn_markdown]
+        buttons = [btn_format]
         if config.storage.enabled:
             btn_save = types.InlineKeyboardButton(
                 "💾 Save",
@@ -191,8 +233,8 @@ def create_bot(config: Config) -> telebot.TeleBot:
         # Auto-save if configured
         if config.storage.enabled and config.storage.path:
             try:
-                md_path = save_recipe_to_file(recipe, config.storage.path)
-                logger.info(f"Recipe auto-saved: {md_path}")
+                file_path = save_recipe_to_file(recipe, config.storage.path, config.output.format)
+                logger.info(f"Recipe auto-saved: {file_path}")
             except Exception as e:
                 logger.exception("Error during auto-save")
 
@@ -366,23 +408,24 @@ Send me a recipe video or link, and I'll extract the recipe for you!
             logger.exception("Error processing document")
             safe_edit_message("❌ Document processing failed. Please try again.", message.chat.id, status.message_id)
 
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("md:"))
-    def handle_markdown_callback(call: types.CallbackQuery):
-        logger.debug(f"Markdown button clicked: {call.data}")
-        recipe_id = call.data[3:]
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("file:"))
+    def handle_file_callback(call: types.CallbackQuery):
+        logger.debug(f"File button clicked: {call.data}")
+        recipe_id = call.data[5:]
         recipe = recipe_cache.get(recipe_id)
 
         if not recipe:
             bot.answer_callback_query(call.id, "❌ Recipe no longer available")
             return
 
+        formatted = format_recipe_by_type(recipe, config.output.format)
         base_name = sanitize_filename(recipe.title)
-        markdown = format_recipe_markdown(recipe)
-        md_file = io.BytesIO(markdown.encode("utf-8"))
-        md_file.name = f"{base_name}.md"
 
-        bot.send_document(call.message.chat.id, md_file, caption=f"📄 {recipe.title}")
-        bot.answer_callback_query(call.id, "✅ Markdown sent")
+        file_obj = io.BytesIO(formatted.content.encode("utf-8"))
+        file_obj.name = f"{base_name}{formatted.extension}"
+
+        bot.send_document(call.message.chat.id, file_obj, caption=f"📄 {recipe.title}")
+        bot.answer_callback_query(call.id, f"✅ {formatted.format_name} sent")
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith("save:"))
     def handle_save_callback(call: types.CallbackQuery):
@@ -399,9 +442,9 @@ Send me a recipe video or link, and I'll extract the recipe for you!
             return
 
         try:
-            md_path = save_recipe_to_file(recipe, config.storage.path)
-            bot.answer_callback_query(call.id, f"✅ Saved: {md_path.name}")
-            logger.info(f"Recipe saved: {md_path}")
+            file_path = save_recipe_to_file(recipe, config.storage.path, config.output.format)
+            bot.answer_callback_query(call.id, f"✅ Saved: {file_path.name}")
+            logger.info(f"Recipe saved: {file_path}")
 
         except Exception:
             logger.exception("Error saving")

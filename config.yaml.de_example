@@ -23,6 +23,12 @@ storage:
   # Pfad zum Obsidian Vault Rezepte-Ordner
   path: /path/to/obsidian/vault/Rezepte
 
+# Ausgabeformat für Rezepte
+output:
+  # "markdown" = Standard Markdown (.md) für Obsidian
+  # "cooklang" = Cooklang Format (.cook) für Cooklang-Apps/Obsidian-Plugin
+  format: markdown
+
 prompts:
   extraction: |
     WICHTIG: Antworte KOMPLETT auf Deutsch! Alle Texte müssen auf Deutsch sein.

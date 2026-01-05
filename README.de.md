@@ -9,7 +9,7 @@ Ein Telegram-Bot, der Kochrezepte aus Videos und Bildern extrahiert. Sende einfa
 - **Video-Analyse**: Extrahiert Rezepte aus Videos (TikTok, Instagram, YouTube, etc.)
 - **Bild-Erkennung**: Funktioniert auch mit Screenshots und Fotos
 - **Sofortiges Feedback**: Antwort direkt im Telegram-Chat
-- **Markdown-Export**: Download als `.md` Datei für Obsidian
+- **Mehrere Formate**: Export als Markdown (`.md`) oder Cooklang (`.cook`)
 - **Lokale Speicherung**: Optional direkt im Obsidian Vault speichern
 - **Plattformübergreifend**: Funktioniert auf Android, iOS, Desktop, Web
 - **Selbst-gehostet**: Läuft auf deinem eigenen Server/NAS
@@ -98,6 +98,10 @@ gemini:
 storage:
   enabled: false
   path: /pfad/zu/obsidian/vault/Rezepte
+
+# Ausgabeformat
+output:
+  format: markdown  # oder "cooklang"
 ```
 
 ### Umgebungsvariablen
@@ -147,8 +151,61 @@ Für deutsche Rezepte nutze `config.yaml.de_example` als Vorlage. Diese enthält
 
 Nach jedem Rezept erscheinen Buttons:
 
-- **📄 Als Markdown**: Sendet das Rezept als `.md` Datei zum Download
+- **📄 Als Markdown** / **📄 Als Cooklang**: Sendet das Rezept als Datei zum Download (Format abhängig von Config)
 - **💾 Speichern**: Speichert im Obsidian Vault (wenn konfiguriert)
+
+### Ausgabeformate
+
+Der Bot unterstützt zwei Ausgabeformate, konfigurierbar über `output.format`:
+
+#### Markdown (Standard)
+
+Standard Markdown-Format (`.md`), optimiert für Obsidian:
+
+```markdown
+**Quelle:** [Creator](https://example.com)
+**Portionen:** 4 Portionen
+**Zeit:** Vorbereitung: 15 min | Kochen: 30 min
+
+## Zutaten
+
+- 400g Spaghetti
+- 200g Guanciale
+
+## Zubereitung
+
+1. Pasta in Salzwasser kochen
+2. Guanciale knusprig braten
+```
+
+#### Cooklang
+
+[Cooklang](https://cooklang.org/)-Format (`.cook`) zur Verwendung mit Cooklang-Apps oder dem Obsidian Cooklang-Plugin:
+
+```
+>> source: https://example.com
+>> servings: 4 Portionen
+>> total time: 45 min
+>> tags: italienisch, pasta
+
+-- Zutaten --
+
+-- @Spaghetti{400%g}
+-- @Guanciale{200%g}
+
+-- Zubereitung --
+
+@Pasta{} in Salzwasser kochen.
+
+@Guanciale{} knusprig braten.
+```
+
+Für Cooklang-Ausgabe:
+
+```yaml
+output:
+  format: cooklang
+```
 
 ## Extraktionslogik
 
