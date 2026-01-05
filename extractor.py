@@ -943,124 +943,229 @@ def format_recipe_chat(recipe: Recipe) -> str:
     return "\n".join(lines)
 
 
+# =============================================================================
+# COOKLANG FORMATTING - Pre-compiled patterns for performance
+# =============================================================================
+
+_COOKLANG_TIME_PATTERN = re.compile(
+    r'\b(\d+(?:\s*-\s*\d+)?)\s*'
+    r'(Minuten?|Min\.?|minutes?|min\.?|'
+    r'Stunden?|Std\.?|hours?|hrs?\.?|'
+    r'Sekunden?|Sek\.?|seconds?|sec\.?|secs?\.?)\b',
+    re.IGNORECASE
+)
+
+_COOKLANG_PREP_WORDS = re.compile(
+    r'gehackt|geschnitten|gewürfelt|gerieben|gepresst|gehobelt|'
+    r'zerkleinert|püriert|gestampft|mariniert|eingeweicht|'
+    r'aufgetaut|zimmerwarm|kalt|warm|weich|hart|frisch|getrocknet|'
+    r'chopped|diced|minced|sliced|grated|pressed|crushed|'
+    r'softened|melted|room temperature|cold|warm|fresh|dried',
+    re.IGNORECASE
+)
+
+# Simplified pattern with length limits to prevent ReDoS
+_COOKLANG_INGREDIENT_PATTERN = re.compile(
+    r'^(\d[\d.,/\s-]{0,20})\s*([a-zA-ZäöüÄÖÜß]{1,15})?\s+(.+)$'
+)
+
+
+def _yaml_escape(value: str) -> str:
+    """Escapes a value for safe YAML output."""
+    if not value:
+        return '""'
+    # Quote if contains special YAML characters
+    if any(c in value for c in ':{}[]&*#?|-<>=!%@`"\'\n\r\t'):
+        escaped = value.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+        return f'"{escaped}"'
+    return value
+
+
+def _extract_timers_from_text(text: str) -> str:
+    """Converts time expressions to Cooklang timer format ~{amount%unit}.
+
+    Examples: "5 Minuten" -> "~{5%Minuten}", "1-2 hours" -> "~{1-2%hours}"
+    """
+    return _COOKLANG_TIME_PATTERN.sub(
+        lambda m: f"~{{{m.group(1).replace(' ', '')}%{m.group(2)}}}",
+        text
+    )
+
+
+def _mark_items_in_text(text: str, items: list[str], prefix: str) -> str:
+    """Marks items (ingredients/equipment) in text with Cooklang syntax.
+
+    Args:
+        text: Text to mark up
+        items: List of item names to find and mark
+        prefix: Cooklang prefix ('@' for ingredients, '#' for equipment)
+
+    Only marks items that aren't already marked.
+    Uses Unicode-aware word boundaries for proper German umlaut support.
+    """
+    text_lower = text.lower()  # Cache for performance
+    seen = set()
+
+    for name in sorted(set(items), key=len, reverse=True):  # Dedupe + sort
+        if not name or len(name) < 2:
+            continue
+        name_lower = name.lower()
+        if name_lower in seen:
+            continue
+        seen.add(name_lower)
+
+        # Skip if already marked
+        if f"{prefix}{name_lower}" in text_lower:
+            continue
+
+        # Unicode-aware word boundaries (lookahead/lookbehind)
+        text = re.sub(
+            rf'(?<![a-zA-ZäöüÄÖÜßéèêëàâáãåæçñ])({re.escape(name)})(?![a-zA-ZäöüÄÖÜßéèêëàâáãåæçñ])',
+            rf'{prefix}\1{{}}',
+            text,
+            flags=re.IGNORECASE,
+            count=1
+        )
+        text_lower = text.lower()  # Update cache after modification
+
+    return text
+
+
+def _extract_ingredient_names(ingredients: list[str]) -> list[str]:
+    """Extracts ingredient names (without amounts/units) for matching."""
+    names = []
+    for ing in ingredients:
+        if ing.startswith("## "):
+            continue
+        # Remove preparation hints in parentheses or after comma
+        clean = re.sub(r'\s*[,(].*$', '', ing)
+        # Extract name from "amount unit name" pattern, or use whole string
+        match = re.match(r'^[\d.,/\s-]+\s*[a-zA-ZäöüÄÖÜß]*\s+(.+)$', clean)
+        name = (match.group(1) if match else clean).strip()
+        if name:
+            names.append(name)
+    return names
+
+
 def format_recipe_cooklang(recipe: Recipe) -> str:
-    """Formats a recipe in Cooklang format (.cook)."""
+    """Formats a recipe in Cooklang format (.cook).
+
+    Implements Cooklang spec features:
+    - YAML frontmatter for metadata
+    - @ingredient{amount%unit} syntax
+    - @ingredient{}(preparation) for prep hints
+    - #cookware{} for equipment
+    - ~{time%unit} for timers
+    - == Section == for grouping
+    """
     lines = []
 
-    # Metadata as >> key: value
-    metadata_fields = [
-        ("source", recipe.source_url),
-        ("author", recipe.creator),
-        ("servings", recipe.servings),
-        ("prep time", recipe.prep_time),
-        ("cook time", recipe.cook_time),
-        ("total time", recipe.total_time),
-        ("difficulty", recipe.difficulty),
-        ("tags", ", ".join(recipe.tags) if recipe.tags else None),
-    ]
+    # YAML Frontmatter for metadata (with escaping for security)
+    metadata_map = {
+        'source': recipe.source_url,
+        'author': recipe.creator,
+        'servings': recipe.servings,
+        'prep time': recipe.prep_time,
+        'cook time': recipe.cook_time,
+        'time required': recipe.total_time,
+        'difficulty': recipe.difficulty,
+    }
+    metadata_lines = [f"{key}: {_yaml_escape(str(val))}" for key, val in metadata_map.items() if val]
 
-    for key, value in metadata_fields:
-        if value:
-            lines.append(f">> {key}: {value}")
+    if recipe.tags:
+        metadata_lines.append("tags:")
+        metadata_lines.extend(f"  - {_yaml_escape(tag)}" for tag in recipe.tags)
 
-    if lines:
-        lines.append("")
+    if metadata_lines:
+        lines.extend(["---", *metadata_lines, "---", ""])
 
-    # Ingredients section as reference (Cooklang convention)
+    # Ingredients section
     if recipe.ingredients:
-        lines.append("-- Ingredients --")
-        lines.append("")
+        lines.extend(["== Ingredients ==", ""])
         for ingredient in recipe.ingredients:
             if ingredient.startswith("## "):
-                # Group header as section
-                lines.append(f"== {ingredient[3:]} ==")
+                lines.extend([f"== {ingredient[3:]} ==", ""])
             else:
-                # Parse ingredient: try to extract amount and unit
-                cooklang_ing = _convert_ingredient_to_cooklang(ingredient)
-                lines.append(f"-- {cooklang_ing}")
+                lines.append(f"- {_convert_ingredient_to_cooklang(ingredient)}")
         lines.append("")
 
-    # Instructions
+    # Instructions with ingredient/equipment/timer markup
     if recipe.instructions:
-        lines.append("-- Instructions --")
-        lines.append("")
-        # Sort equipment by length (longest first) to avoid partial matches
-        sorted_equipment = sorted(recipe.equipment or [], key=len, reverse=True)
+        lines.extend(["== Instructions ==", ""])
+        ingredient_names = _extract_ingredient_names(recipe.ingredients or [])
+
         for step in recipe.instructions:
-            modified_step = step
-            for equip in sorted_equipment:
-                # Only replace if not already marked up
-                if equip.lower() in modified_step.lower() and f"#{equip.lower()}" not in modified_step.lower():
-                    modified_step = re.sub(
-                        rf"\b({re.escape(equip)})\b",
-                        r"#\1{}",
-                        modified_step,
-                        flags=re.IGNORECASE,
-                        count=1
-                    )
-            lines.append(modified_step)
-            lines.append("")
+            step = _extract_timers_from_text(step)
+            step = _mark_items_in_text(step, recipe.equipment or [], '#')
+            step = _mark_items_in_text(step, ingredient_names, '@')
+            lines.extend([step, ""])
 
-    # Equipment as separate section
-    if recipe.equipment:
-        lines.append("-- Equipment --")
-        for item in (recipe.equipment or []):
-            lines.append(f"-- #{item}{{}}")
-        lines.append("")
-
-    # Tips/Notes as comments
+    # Notes as > prefix (Cooklang notes syntax)
     if recipe.notes:
-        lines.append("-- Tips --")
-        for note in recipe.notes:
-            lines.append(f"-- {note}")
+        lines.extend(f"> {note}" for note in recipe.notes)
         lines.append("")
 
     return "\n".join(lines)
 
 
 def _convert_ingredient_to_cooklang(ingredient: str) -> str:
-    """Converts an ingredient string to Cooklang @ingredient{amount%unit} format.
+    """Converts an ingredient string to Cooklang @ingredient{amount%unit}(prep) format.
 
     Handles various formats:
     - "200g Mehl" -> @Mehl{200%g}
     - "2 EL Öl" -> @Öl{2%EL}
     - "1/2 TL Salz" -> @Salz{1/2%TL}
     - "200-250g Butter" -> @Butter{200-250%g}
-    - "1 1/2 cups Milch" -> @Milch{1 1/2%cups}
+    - "1 Zwiebel, fein gehackt" -> @Zwiebel{1}(fein gehackt)
+    - "200g Mehl (gesiebt)" -> @Mehl{200%g}(gesiebt)
     - "Salz" -> @Salz{}
     """
     ingredient = ingredient.strip()
 
-    # Limit length to prevent ReDoS attacks
+    # Security: Limit length to prevent ReDoS attacks
     if len(ingredient) > 200:
         return f"@{ingredient[:50]}...{{}}"
-
-    # Skip group headers
+    # Section headers should return Cooklang section syntax
     if ingredient.startswith("## "):
-        return ingredient
+        return f"== {ingredient[3:]} =="
 
-    # Pattern with more specific matching to prevent catastrophic backtracking:
-    # - Amount: digits with optional decimal/fraction, optional range
-    # - Unit: single word (letters only)
-    # - Name: everything else
-    match = re.match(
-        r'^([\d.,/]+(?:\s*-\s*[\d.,/]+)?(?:\s+[\d/]+)?)\s*([a-zA-ZäöüÄÖÜß]+)?\s+(.+)$',
-        ingredient
-    )
+    # Extract preparation hint from parentheses or comma-separated suffix
+    prep_hint, clean_ingredient = _extract_prep_hint(ingredient)
 
-    if match:
+    # Parse "amount unit name" pattern (using pre-compiled pattern)
+    match = _COOKLANG_INGREDIENT_PATTERN.match(clean_ingredient)
+
+    if match and match.group(3):
         amount = match.group(1).strip().replace(',', '.')
         unit = match.group(2) or ""
         name = match.group(3).strip()
+        result = f"@{name}{{{amount}%{unit}}}" if unit else f"@{name}{{{amount}}}"
+    else:
+        # No amount found - just use ingredient name
+        result = f"@{clean_ingredient}{{}}"
 
-        # Validate we have an actual ingredient name
-        if name:
-            if unit:
-                return f"@{name}{{{amount}%{unit}}}"
-            return f"@{name}{{{amount}}}"
+    return f"{result}({prep_hint})" if prep_hint else result
 
-    # No amount found - just use ingredient name
-    return f"@{ingredient}{{}}"
+
+def _extract_prep_hint(ingredient: str) -> tuple[str | None, str]:
+    """Extracts preparation hint from ingredient string.
+
+    Returns: (prep_hint, clean_ingredient) tuple
+    """
+    # Pattern 1: "(preparation)" at the end
+    paren_match = re.search(r'\s*\(([^)]+)\)\s*$', ingredient)
+    if paren_match:
+        return paren_match.group(1).strip(), ingredient[:paren_match.start()].strip()
+
+    # Pattern 2: ", preparation" at the end (only if looks like prep instruction)
+    comma_match = re.search(r',\s*([^,]+)$', ingredient)
+    if comma_match:
+        potential_hint = comma_match.group(1).strip()
+        # Use pre-compiled pattern for prep words
+        if _COOKLANG_PREP_WORDS.search(potential_hint):
+            return potential_hint, ingredient[:comma_match.start()].strip()
+
+    return None, ingredient
 
 
 def format_recipe_markdown(recipe: Recipe) -> str:
