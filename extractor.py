@@ -438,6 +438,66 @@ def download_video_from_url(url: str, output_path: Path, temp_dir: Path) -> tupl
         return None, metadata
 
 
+def extract_recipe_from_metadata(
+    config: Config,
+    metadata: VideoMetadata,
+    source_url: str,
+) -> Recipe:
+    """
+    Extrahiert ein Rezept NUR aus Video-Metadaten (ohne Video).
+    Wird verwendet wenn Video-Download fehlschlägt aber Metadaten verfügbar sind.
+    """
+    client = genai.Client(api_key=config.gemini.api_key)
+
+    # Strukturierten Prompt mit allen verfügbaren Quellen bauen
+    prompt = EXTRACTION_PROMPT
+    prompt += "\n\n" + "=" * 60
+    prompt += "\nVERFÜGBARE QUELLEN (kein Video verfügbar, nur Text):"
+    prompt += "\n" + "=" * 60
+
+    has_content = False
+
+    if metadata.subtitles:
+        prompt += f"\n\n### 1. UNTERTITEL/CAPTIONS (höchste Priorität für Mengenangaben!):\n{metadata.subtitles}"
+        has_content = True
+
+    if metadata.description:
+        prompt += f"\n\n### 2. VIDEO-BESCHREIBUNG:\n{metadata.description}"
+        has_content = True
+
+    if metadata.title:
+        prompt += f"\n\n### 3. VIDEO-TITEL: {metadata.title}"
+        has_content = True
+
+    if metadata.uploader:
+        prompt += f"\n### 4. CREATOR: {metadata.uploader}"
+
+    if metadata.tags:
+        prompt += f"\n### 5. TAGS: {', '.join(metadata.tags[:10])}"
+
+    prompt += f"\n\n### QUELL-URL: {source_url}"
+
+    if not has_content:
+        raise ValueError("Keine Metadaten verfügbar für Extraktion")
+
+    prompt += "\n\n" + "=" * 60
+    prompt += "\nHINWEIS: Video konnte nicht heruntergeladen werden. Extrahiere das Rezept aus den obigen Text-Quellen."
+
+    logger.info("Sende Metadaten an Gemini (ohne Video)...")
+    response = client.models.generate_content(
+        model=config.gemini.model,
+        contents=[prompt],
+    )
+
+    recipe = _parse_response(response.text, source_url)
+
+    # Metadaten zum Rezept hinzufügen
+    recipe.source_platform = metadata.platform
+    recipe.creator = metadata.uploader
+
+    return recipe
+
+
 def extract_recipe_from_url(
     config: Config,
     url: str,
@@ -445,6 +505,7 @@ def extract_recipe_from_url(
     """
     Extrahiert ein Rezept aus einer URL.
     Bei Video-Plattformen (TikTok, Instagram, YouTube) wird das Video heruntergeladen.
+    Fallback-Reihenfolge: Video > Metadaten > Webseite
     """
     import tempfile
 
@@ -459,8 +520,16 @@ def extract_recipe_from_url(
 
             if downloaded:
                 return extract_recipe_from_video(config, downloaded, url, metadata)
-            else:
-                logger.warning("Video-Download fehlgeschlagen, versuche Webseiten-Text...")
+
+            # Video-Download fehlgeschlagen - aber haben wir Metadaten?
+            if metadata and (metadata.description or metadata.subtitles or metadata.title):
+                logger.info("Video-Download fehlgeschlagen, verwende extrahierte Metadaten...")
+                try:
+                    return extract_recipe_from_metadata(config, metadata, url)
+                except Exception as e:
+                    logger.warning(f"Metadaten-Extraktion fehlgeschlagen: {e}")
+
+            logger.warning("Weder Video noch Metadaten verfügbar, versuche Webseiten-Text...")
 
     # Webseiten-Extraktion: Erst Schema versuchen, dann Text
     return extract_recipe_from_webpage(config, url)

@@ -144,6 +144,194 @@ Nach jedem Rezept erscheinen Buttons:
 - **📄 Als Markdown**: Sendet das Rezept als `.md` Datei zum Download
 - **💾 Speichern**: Speichert im Obsidian Vault (wenn konfiguriert)
 
+## Extraktionslogik
+
+Der Bot nutzt verschiedene Datenquellen je nach Input. Hier eine Übersicht aller Szenarien:
+
+### Eingabetypen
+
+| Eingabe | Was passiert |
+|---------|--------------|
+| **Video-URL** (TikTok, YouTube, Instagram) | Video + Metadaten herunterladen → Gemini |
+| **Webseiten-URL** (Rezept-Blog) | JSON-LD Schema parsen oder Text → Gemini |
+| **Video-Datei** (direkt gesendet) | Video → Gemini |
+| **Bild/Screenshot** | Bild → Gemini |
+| **Bild + URL** (als Caption) | Bild + Webseiten-Text → Gemini |
+
+### Video-Plattformen (TikTok, YouTube, Instagram, Facebook)
+
+```
+URL empfangen
+    │
+    ▼
+┌─────────────────────────────┐
+│  1. Metadaten extrahieren   │  ← yt-dlp --dump-json
+│     • Titel                 │
+│     • Beschreibung          │
+│     • Creator/Uploader      │
+│     • Tags                  │
+│     • Untertitel (YouTube)  │
+└─────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────┐
+│  2. Video herunterladen     │  ← yt-dlp
+└─────────────────────────────┘
+    │
+    ├── Erfolg ──────────────────────────────────────┐
+    │                                                 ▼
+    │                              ┌─────────────────────────────────┐
+    │                              │  Video + ALLE Metadaten         │
+    │                              │  an Gemini senden               │
+    │                              │                                 │
+    │                              │  Gemini bekommt:                │
+    │                              │  • Video-Datei (visuell)        │
+    │                              │  • Untertitel (höchste Prio)    │
+    │                              │  • Beschreibung (Zutaten!)      │
+    │                              │  • Titel, Creator, Tags         │
+    │                              └─────────────────────────────────┘
+    │
+    └── Fehlgeschlagen ──────────────────────────────┐
+                                                      ▼
+                                   ┌─────────────────────────────────┐
+                                   │  Metadaten vorhanden?           │
+                                   └─────────────────────────────────┘
+                                        │
+                          ┌─────────────┴─────────────┐
+                          ▼                           ▼
+                    Ja (Beschreibung              Nein
+                    oder Titel)                      │
+                          │                          │
+                          ▼                          ▼
+           ┌──────────────────────┐    ┌──────────────────────┐
+           │  NUR Metadaten an    │    │  Webseiten-Text      │
+           │  Gemini (ohne Video) │    │  extrahieren         │
+           │                      │    │  (Fallback)          │
+           │  → Rezept aus        │    └──────────────────────┘
+           │    Beschreibung      │
+           └──────────────────────┘
+```
+
+**Quellen-Priorisierung bei Konflikten:**
+1. Untertitel/Captions (genaueste Quelle für gesprochene Mengen)
+2. Video-Beschreibung (oft vollständige Zutatenlisten)
+3. Video-Inhalt (visuelle Informationen)
+4. Webseiten-Text (Kontext)
+
+### Rezept-Webseiten (Blogs, Chefkoch, etc.)
+
+```
+URL empfangen
+    │
+    ▼
+┌─────────────────────────────┐
+│  HTML herunterladen         │
+└─────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────┐
+│  JSON-LD Schema suchen      │  ← <script type="application/ld+json">
+│  (@type: "Recipe")          │
+└─────────────────────────────┘
+    │
+    ├── Schema gefunden ─────────────────────────────┐
+    │                                                 ▼
+    │                              ┌─────────────────────────────────┐
+    │                              │  Direkt parsen (ohne Gemini!)  │
+    │                              │                                 │
+    │                              │  Extrahiert:                    │
+    │                              │  • recipeIngredient             │
+    │                              │  • recipeInstructions           │
+    │                              │  • prepTime, cookTime           │
+    │                              │  • recipeYield (Portionen)      │
+    │                              │  • author, keywords             │
+    │                              │                                 │
+    │                              │  → 90%+ Genauigkeit!            │
+    │                              └─────────────────────────────────┘
+    │
+    └── Kein Schema ─────────────────────────────────┐
+                                                      ▼
+                                   ┌─────────────────────────────────┐
+                                   │  Text extrahieren und an        │
+                                   │  Gemini senden                  │
+                                   └─────────────────────────────────┘
+```
+
+**Warum JSON-LD so gut ist:**
+Die meisten Rezept-Webseiten haben strukturierte Daten für Google/Pinterest. Diese sind bereits perfekt formatiert - keine KI-Interpretation nötig!
+
+### Bild/Screenshot
+
+```
+Bild empfangen
+    │
+    ├── Mit URL als Caption? ────────────────────────┐
+    │         │                                       ▼
+    │         │                    ┌─────────────────────────────────┐
+    │         │                    │  Webseiten-Text abrufen         │
+    │         │                    └─────────────────────────────────┘
+    │         │                                       │
+    │         └───────────────────────────────────────┤
+    │                                                 ▼
+    ▼                              ┌─────────────────────────────────┐
+┌─────────────────────────────┐    │  Bild + Webseiten-Text          │
+│  Nur Bild an Gemini         │    │  an Gemini senden               │
+└─────────────────────────────┘    └─────────────────────────────────┘
+```
+
+### Video-Datei (direkt gesendet)
+
+```
+Video empfangen (Telegram-Upload)
+    │
+    ▼
+┌─────────────────────────────┐
+│  Video an Gemini senden     │
+│                             │
+│  Keine Metadaten verfügbar! │
+│  Nur visuelle Analyse       │
+└─────────────────────────────┘
+```
+
+**Tipp:** Bei direkt gesendeten Videos fehlen Beschreibung/Untertitel. Wenn das Original-Video eine detaillierte Beschreibung hat, besser den Link senden!
+
+### Datenmodell
+
+Jedes extrahierte Rezept enthält:
+
+| Feld | Beschreibung | Quelle |
+|------|--------------|--------|
+| `title` | Rezeptname | Titel, Video, Bild |
+| `servings` | Portionen | Beschreibung, Schema |
+| `prep_time` | Vorbereitungszeit | Schema, Beschreibung |
+| `cook_time` | Kochzeit | Schema, Beschreibung |
+| `total_time` | Gesamtzeit | Schema, berechnet |
+| `difficulty` | einfach/mittel/schwer | Gemini-Einschätzung |
+| `tags` | Kategorien | Tags, Keywords, Schema |
+| `ingredients` | Zutatenliste mit Mengen | Alle Quellen |
+| `instructions` | Zubereitungsschritte | Alle Quellen |
+| `equipment` | Benötigte Geräte | Video, Beschreibung |
+| `notes` | Tipps, Variationen | Video, Beschreibung |
+| `source_url` | Original-URL | Input |
+| `source_platform` | tiktok/youtube/web/etc. | Erkannt aus URL |
+| `creator` | Video-Ersteller | Uploader-Metadaten |
+
+### Bekannte Einschränkungen
+
+| Plattform | Status | Anmerkung |
+|-----------|--------|-----------|
+| **YouTube** | ✅ Gut | Video + Untertitel + Beschreibung |
+| **TikTok** | ⚠️ Eingeschränkt | Video-Download oft blockiert, Metadaten meist OK |
+| **Instagram** | ⚠️ Eingeschränkt | Erfordert oft Login, Metadaten limitiert |
+| **Facebook** | ⚠️ Eingeschränkt | Ähnlich wie Instagram |
+| **Rezept-Blogs** | ✅ Sehr gut | JSON-LD Schema = perfekte Daten |
+| **Pinterest** | ⚠️ Eingeschränkt | Leitet oft zu Original-Seite weiter |
+
+**Workaround bei Download-Problemen:**
+1. Video in der App herunterladen (TikTok: "Speichern", Instagram: Drittanbieter-App)
+2. Video direkt an den Bot senden
+3. Optional: Original-URL als Caption hinzufügen für Kontext
+
 ## Bot-Befehle
 
 - `/start` - Hilfe anzeigen
