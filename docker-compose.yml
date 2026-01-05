@@ -5,13 +5,13 @@ services:
     restart: unless-stopped
 
     environment:
-      # Setze diese Werte ODER nutze config.yaml
+      # Set these values OR use config.yaml
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
 
     volumes:
-      # Konfiguration
+      # Configuration
       - ./config.yaml:/app/config.yaml:ro
 
-      # Optional: Obsidian Vault für lokales Speichern
-      # - /pfad/zu/obsidian/vault/Rezepte:/vault
+      # Optional: Obsidian vault for local storage
+      # - /path/to/obsidian/vault/Recipes:/vault

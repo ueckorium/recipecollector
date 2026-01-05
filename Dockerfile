@@ -1,20 +1,20 @@
 FROM python:3.11-slim
 
-# System-Abhängigkeiten
+# System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Arbeitsverzeichnis
+# Working directory
 WORKDIR /app
 
-# Dependencies installieren
+# Install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# App kopieren
+# Copy app
 COPY *.py .
 COPY config.yaml.example .
 
-# Bot starten
+# Start bot
 CMD ["python", "bot.py"]

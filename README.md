@@ -403,16 +403,6 @@ TikTok and Instagram often block downloads. Solution:
 1. Download video on your phone (with TikTok app or third-party app)
 2. Send video directly to the bot
 
-### "Could not extract frames"
-
-Make sure `ffmpeg` is installed:
-```bash
-# Ubuntu/Debian
-sudo apt install ffmpeg
-
-# Docker: Already included
-```
-
 ### Bot doesn't respond
 
 1. Check if your user ID is in `allowed_users`
@@ -434,9 +424,10 @@ recipe-collector/
 ├── config.yaml.example # English config template
 ├── config.yaml.de_example # German config template
 ├── requirements.txt
+├── README.md           # English
+├── README.de.md        # German
 ├── Dockerfile
-├── docker-compose.yml
-└── README.md
+└── docker-compose.yml
 ```
 
 ## License

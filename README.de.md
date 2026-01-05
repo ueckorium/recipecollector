@@ -407,16 +407,6 @@ TikTok und Instagram blockieren oft Downloads. Lösung:
 1. Video auf dem Handy herunterladen (mit TikTok-App oder Drittanbieter-App)
 2. Video direkt an den Bot senden
 
-### "Konnte keine Frames extrahieren"
-
-Stelle sicher dass `ffmpeg` installiert ist:
-```bash
-# Ubuntu/Debian
-sudo apt install ffmpeg
-
-# Docker: Bereits enthalten
-```
-
 ### Bot antwortet nicht
 
 1. Prüfe ob deine User-ID in `allowed_users` steht
