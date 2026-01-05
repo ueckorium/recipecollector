@@ -221,6 +221,11 @@ class Recipe:
     creator: str | None = None
 
 
+class NotARecipeError(ValueError):
+    """Raised when content does not contain a valid recipe."""
+    pass
+
+
 def extract_recipe_from_video(
     config: Config,
     video_path: Path,
@@ -862,17 +867,18 @@ def _parse_response(response_text: str, source_url: str | None) -> Recipe:
 
 
 def _validate_recipe(recipe: Recipe) -> None:
-    """Validates a recipe and logs warnings for issues."""
+    """Validates a recipe and raises NotARecipeError if invalid."""
+    has_title = recipe.title and recipe.title != "Unknown Recipe"
+    has_ingredients = bool(recipe.ingredients)
+    has_instructions = bool(recipe.instructions)
+
+    # Must have both ingredients AND instructions to be useful
+    if not has_ingredients or not has_instructions:
+        raise NotARecipeError("Recipe is incomplete (missing ingredients or instructions)")
+
     warnings = []
-
-    if not recipe.title or recipe.title == "Unknown Recipe":
+    if not has_title:
         warnings.append("No title found")
-
-    if not recipe.ingredients:
-        warnings.append("No ingredients found")
-
-    if not recipe.instructions:
-        warnings.append("No instructions found")
 
     # Check for obviously missing quantities
     ingredients_without_amounts = 0
@@ -890,14 +896,9 @@ def _validate_recipe(recipe: Recipe) -> None:
 
 
 def _escape_telegram_markdown(text: str) -> str:
-    """Escapes special characters for Telegram Markdown.
-
-    Telegram Markdown V1 uses: * _ ` [
-    We escape these to prevent parsing errors.
-    """
+    r"""Escapes special characters for Telegram Markdown V1: \ * _ ` ["""
     if not text:
         return ""
-    # Escape backslashes first, then special chars
     for char in ('\\', '*', '_', '`', '['):
         text = text.replace(char, f'\\{char}')
     return text

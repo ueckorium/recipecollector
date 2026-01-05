@@ -18,6 +18,7 @@ from telebot import types
 from config import Config, load_config
 from extractor import (
     Recipe,
+    NotARecipeError,
     extract_recipe_from_video,
     extract_recipe_from_image,
     extract_recipe_from_url,
@@ -196,6 +197,15 @@ def create_bot(config: Config) -> telebot.TeleBot:
         except telebot.apihelper.ApiTelegramException:
             pass  # Message no longer exists or text unchanged
 
+    def handle_extraction_error(e: Exception, chat_id: int, status_message_id: int, content_type: str) -> None:
+        """Handles extraction errors with appropriate user feedback."""
+        if isinstance(e, NotARecipeError):
+            logger.info(f"{content_type} does not contain a recipe")
+            safe_edit_message(f"🤷 No recipe found in this {content_type}.", chat_id, status_message_id)
+        else:
+            logger.exception(f"Error processing {content_type}")
+            safe_edit_message(f"❌ {content_type.capitalize()} processing failed. Please try again.", chat_id, status_message_id)
+
     def create_recipe_buttons(recipe_id: str) -> types.InlineKeyboardMarkup:
         markup = types.InlineKeyboardMarkup(row_width=2)
         # Button label based on output format
@@ -283,14 +293,11 @@ Send me a recipe video or link, and I'll extract the recipe for you!
         try:
             safe_edit_message("⏳ Analyzing recipe...", message.chat.id, status.message_id)
             recipe = extract_recipe_from_url(config, url)
-
             logger.info(f"Recipe extracted: {recipe.title}")
             safe_delete_message(message.chat.id, status.message_id)
             send_recipe(message, recipe)
-
-        except Exception:
-            logger.exception("Error processing URL")
-            safe_edit_message("❌ Processing failed. Please try again.", message.chat.id, status.message_id)
+        except Exception as e:
+            handle_extraction_error(e, message.chat.id, status.message_id, "content")
 
     @bot.message_handler(content_types=["video", "video_note", "animation"])
     @authorized_handler("Video received")
@@ -321,14 +328,11 @@ Send me a recipe video or link, and I'll extract the recipe for you!
                 # Send directly to Gemini
                 safe_edit_message("⏳ Analyzing video...", message.chat.id, status.message_id)
                 recipe = extract_recipe_from_video(config, video_path, source_url)
-
                 logger.info(f"Recipe extracted: {recipe.title}")
                 safe_delete_message(message.chat.id, status.message_id)
                 send_recipe(message, recipe)
-
-        except Exception:
-            logger.exception("Error processing video")
-            safe_edit_message("❌ Video processing failed. Please try again.", message.chat.id, status.message_id)
+        except Exception as e:
+            handle_extraction_error(e, message.chat.id, status.message_id, "video")
 
     @bot.message_handler(content_types=["photo"])
     @authorized_handler("Photo received")
@@ -352,14 +356,11 @@ Send me a recipe video or link, and I'll extract the recipe for you!
 
                 safe_edit_message("⏳ Analyzing image...", message.chat.id, status.message_id)
                 recipe = extract_recipe_from_image(config, image_path, source_url)
-
                 logger.info(f"Recipe extracted: {recipe.title}")
                 safe_delete_message(message.chat.id, status.message_id)
                 send_recipe(message, recipe)
-
-        except Exception:
-            logger.exception("Error processing image")
-            safe_edit_message("❌ Image processing failed. Please try again.", message.chat.id, status.message_id)
+        except Exception as e:
+            handle_extraction_error(e, message.chat.id, status.message_id, "image")
 
     @bot.message_handler(content_types=["document"])
     @authorized_handler("Document received")
@@ -403,10 +404,8 @@ Send me a recipe video or link, and I'll extract the recipe for you!
                 logger.info(f"Recipe extracted: {recipe.title}")
                 safe_delete_message(message.chat.id, status.message_id)
                 send_recipe(message, recipe)
-
-        except Exception:
-            logger.exception("Error processing document")
-            safe_edit_message("❌ Document processing failed. Please try again.", message.chat.id, status.message_id)
+        except Exception as e:
+            handle_extraction_error(e, message.chat.id, status.message_id, "file")
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith("file:"))
     def handle_file_callback(call: types.CallbackQuery):
