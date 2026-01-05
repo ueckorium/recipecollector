@@ -1,106 +1,108 @@
 # Recipe Collector Bot
 
-Ein Telegram-Bot, der Kochrezepte aus Videos und Bildern extrahiert. Sende einfach ein TikTok-Video, Instagram-Reel oder ein Screenshot - der Bot liefert das formatierte Rezept zurück.
+🌐 *[Deutsch](README.de.md) | English*
+
+A Telegram bot that extracts cooking recipes from videos and images. Simply send a TikTok video, Instagram Reel, or screenshot - the bot returns the formatted recipe.
 
 ## Features
 
-- **Video-Analyse**: Extrahiert Rezepte aus Videos (TikTok, Instagram, YouTube, etc.)
-- **Bild-Erkennung**: Funktioniert auch mit Screenshots und Fotos
-- **Sofortiges Feedback**: Antwort direkt im Telegram-Chat
-- **Markdown-Export**: Download als `.md` Datei für Obsidian
-- **Lokale Speicherung**: Optional direkt im Obsidian Vault speichern
-- **Plattformübergreifend**: Funktioniert auf Android, iOS, Desktop, Web
-- **Selbst-gehostet**: Läuft auf deinem eigenen Server/NAS
+- **Video Analysis**: Extracts recipes from videos (TikTok, Instagram, YouTube, etc.)
+- **Image Recognition**: Also works with screenshots and photos
+- **Instant Feedback**: Response directly in Telegram chat
+- **Markdown Export**: Download as `.md` file for Obsidian
+- **Local Storage**: Optionally save directly to Obsidian vault
+- **Cross-Platform**: Works on Android, iOS, Desktop, Web
+- **Self-Hosted**: Runs on your own server/NAS
 
-## Schnellstart
+## Quick Start
 
-### 1. Bot erstellen
+### 1. Create Bot
 
-1. Öffne Telegram und suche nach `@BotFather`
-2. Sende `/newbot`
-3. Wähle einen Namen (z.B. "Mein Rezept Bot")
-4. Wähle einen Username (z.B. `mein_rezept_bot`)
-5. Kopiere den Bot-Token
+1. Open Telegram and search for `@BotFather`
+2. Send `/newbot`
+3. Choose a name (e.g., "My Recipe Bot")
+4. Choose a username (e.g., `my_recipe_bot`)
+5. Copy the bot token
 
 ### 2. Gemini API Key
 
-1. Gehe zu https://aistudio.google.com/app/apikey
-2. Klicke auf "Create API Key"
-3. Kopiere den Key
+1. Go to https://aistudio.google.com/app/apikey
+2. Click "Create API Key"
+3. Copy the key
 
-### 3. Deine Telegram User-ID
+### 3. Your Telegram User ID
 
-1. Öffne Telegram und suche nach `@userinfobot`
-2. Sende eine beliebige Nachricht
-3. Kopiere deine User-ID (Zahl)
+1. Open Telegram and search for `@userinfobot`
+2. Send any message
+3. Copy your user ID (number)
 
 ### 4. Installation
 
-#### Mit Docker (empfohlen)
+#### With Docker (recommended)
 
 ```bash
-# Repository klonen
-git clone https://github.com/DEIN_USERNAME/recipe-collector.git
+# Clone repository
+git clone https://github.com/YOUR_USERNAME/recipe-collector.git
 cd recipe-collector
 
-# Konfiguration erstellen
+# Create configuration
 cp config.yaml.example config.yaml
-nano config.yaml  # Werte eintragen
+nano config.yaml  # Enter values
 
-# Starten
+# Start
 docker compose up -d
 
-# Logs anzeigen
+# View logs
 docker compose logs -f
 ```
 
-#### Ohne Docker
+#### Without Docker
 
 ```bash
-# Repository klonen
-git clone https://github.com/DEIN_USERNAME/recipe-collector.git
+# Clone repository
+git clone https://github.com/YOUR_USERNAME/recipe-collector.git
 cd recipe-collector
 
-# Voraussetzungen
+# Prerequisites
 # - Python 3.11+
 # - ffmpeg
 
-# Virtual Environment
+# Virtual environment
 python3 -m venv venv
 source venv/bin/activate
 
 # Dependencies
 pip install -r requirements.txt
 
-# Konfiguration
+# Configuration
 cp config.yaml.example config.yaml
-nano config.yaml  # Werte eintragen
+nano config.yaml  # Enter values
 
-# Starten
+# Start
 python bot.py
 ```
 
-## Konfiguration
+## Configuration
 
 ```yaml
 telegram:
-  bot_token: "123456:ABC..."  # Von @BotFather
+  bot_token: "123456:ABC..."  # From @BotFather
   allowed_users:
-    - 123456789  # Deine User-ID
+    - 123456789  # Your user ID
 
 gemini:
-  api_key: "AIza..."  # Von Google AI Studio
-  model: gemini-1.5-flash
+  api_key: "AIza..."  # From Google AI Studio
+  model: gemini-2.0-flash
 
-# Optional: Lokales Speichern
+# Optional: Local storage
 storage:
   enabled: false
-  path: /pfad/zu/obsidian/vault/Rezepte
+  path: /path/to/obsidian/vault/Recipes
 ```
 
-### Umgebungsvariablen
+### Environment Variables
 
-Alternativ kannst du Umgebungsvariablen nutzen:
+Alternatively, you can use environment variables:
 
 ```yaml
 telegram:
@@ -115,252 +117,252 @@ export TELEGRAM_BOT_TOKEN="123456:ABC..."
 export GEMINI_API_KEY="AIza..."
 ```
 
-## Nutzung
+## Usage
 
-### Video senden
+### Send Video
 
-1. Finde ein Rezept-Video (TikTok, Instagram, etc.)
-2. Teile das Video an deinen Bot (oder lade es herunter und sende es direkt)
-3. Der Bot antwortet mit dem extrahierten Rezept
+1. Find a recipe video (TikTok, Instagram, etc.)
+2. Share the video to your bot (or download and send directly)
+3. The bot responds with the extracted recipe
 
-### Link senden
+### Send Link
 
-1. Kopiere die URL des Videos
-2. Sende die URL an den Bot
-3. Der Bot lädt das Video herunter und extrahiert das Rezept
+1. Copy the video URL
+2. Send the URL to the bot
+3. The bot downloads the video and extracts the recipe
 
-**Hinweis:** Das Herunterladen von TikTok/Instagram-Links ist oft unzuverlässig. Bei Problemen: Video auf dem Handy herunterladen und direkt senden.
+**Note:** Downloading TikTok/Instagram links is often unreliable. If you have problems: Download the video on your phone and send it directly.
 
-### Bild senden
+### Send Image
 
-1. Mache einen Screenshot von einem Rezept
-2. Sende das Bild an den Bot
-3. Der Bot extrahiert das Rezept
+1. Take a screenshot of a recipe
+2. Send the image to the bot
+3. The bot extracts the recipe
 
 ### Buttons
 
-Nach jedem Rezept erscheinen Buttons:
+After each recipe, buttons appear:
 
-- **📄 Als Markdown**: Sendet das Rezept als `.md` Datei zum Download
-- **💾 Speichern**: Speichert im Obsidian Vault (wenn konfiguriert)
+- **📄 As Markdown**: Sends the recipe as `.md` file for download
+- **💾 Save**: Saves to Obsidian vault (if configured)
 
-## Extraktionslogik
+## Extraction Logic
 
-Der Bot nutzt verschiedene Datenquellen je nach Input. Hier eine Übersicht aller Szenarien:
+The bot uses different data sources depending on input. Here's an overview of all scenarios:
 
-### Eingabetypen
+### Input Types
 
-| Eingabe | Was passiert |
-|---------|--------------|
-| **Video-URL** (TikTok, YouTube, Instagram) | Video + Metadaten herunterladen → Gemini |
-| **Webseiten-URL** (Rezept-Blog) | JSON-LD Schema parsen oder Text → Gemini |
-| **Video-Datei** (direkt gesendet) | Video → Gemini |
-| **Bild/Screenshot** | Bild → Gemini |
-| **Bild + URL** (als Caption) | Bild + Webseiten-Text → Gemini |
+| Input | What happens |
+|-------|--------------|
+| **Video URL** (TikTok, YouTube, Instagram) | Download video + metadata → Gemini |
+| **Webpage URL** (Recipe blog) | Parse JSON-LD schema or text → Gemini |
+| **Video file** (sent directly) | Video → Gemini |
+| **Image/Screenshot** | Image → Gemini |
+| **Image + URL** (as caption) | Image + webpage text → Gemini |
 
-### Video-Plattformen (TikTok, YouTube, Instagram, Facebook)
+### Video Platforms (TikTok, YouTube, Instagram, Facebook)
 
 ```
-URL empfangen
+URL received
     │
     ▼
 ┌─────────────────────────────┐
-│  1. Metadaten extrahieren   │  ← yt-dlp --dump-json
-│     • Titel                 │
-│     • Beschreibung          │
+│  1. Extract metadata        │  ← yt-dlp --dump-json
+│     • Title                 │
+│     • Description           │
 │     • Creator/Uploader      │
 │     • Tags                  │
-│     • Untertitel (YouTube)  │
+│     • Subtitles (YouTube)   │
 └─────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────┐
-│  2. Video herunterladen     │  ← yt-dlp
+│  2. Download video          │  ← yt-dlp
 └─────────────────────────────┘
     │
-    ├── Erfolg ──────────────────────────────────────┐
-    │                                                 ▼
+    ├── Success ───────────────────────────────────────┐
+    │                                                   ▼
     │                              ┌─────────────────────────────────┐
-    │                              │  Video + ALLE Metadaten         │
-    │                              │  an Gemini senden               │
+    │                              │  Send video + ALL metadata      │
+    │                              │  to Gemini                      │
     │                              │                                 │
-    │                              │  Gemini bekommt:                │
-    │                              │  • Video-Datei (visuell)        │
-    │                              │  • Untertitel (höchste Prio)    │
-    │                              │  • Beschreibung (Zutaten!)      │
-    │                              │  • Titel, Creator, Tags         │
+    │                              │  Gemini receives:               │
+    │                              │  • Video file (visual)          │
+    │                              │  • Subtitles (highest priority) │
+    │                              │  • Description (ingredients!)   │
+    │                              │  • Title, Creator, Tags         │
     │                              └─────────────────────────────────┘
     │
-    └── Fehlgeschlagen ──────────────────────────────┐
-                                                      ▼
+    └── Failed ────────────────────────────────────────┐
+                                                        ▼
                                    ┌─────────────────────────────────┐
-                                   │  Metadaten vorhanden?           │
+                                   │  Metadata available?            │
                                    └─────────────────────────────────┘
                                         │
                           ┌─────────────┴─────────────┐
                           ▼                           ▼
-                    Ja (Beschreibung              Nein
-                    oder Titel)                      │
+                    Yes (Description              No
+                    or Title)                        │
                           │                          │
                           ▼                          ▼
            ┌──────────────────────┐    ┌──────────────────────┐
-           │  NUR Metadaten an    │    │  Webseiten-Text      │
-           │  Gemini (ohne Video) │    │  extrahieren         │
-           │                      │    │  (Fallback)          │
-           │  → Rezept aus        │    └──────────────────────┘
-           │    Beschreibung      │
+           │  ONLY metadata to    │    │  Extract webpage     │
+           │  Gemini (no video)   │    │  text (fallback)     │
+           │                      │    └──────────────────────┘
+           │  → Recipe from       │
+           │    description       │
            └──────────────────────┘
 ```
 
-**Quellen-Priorisierung bei Konflikten:**
-1. Untertitel/Captions (genaueste Quelle für gesprochene Mengen)
-2. Video-Beschreibung (oft vollständige Zutatenlisten)
-3. Video-Inhalt (visuelle Informationen)
-4. Webseiten-Text (Kontext)
+**Source prioritization in case of conflicts:**
+1. Subtitles/Captions (most accurate source for spoken quantities)
+2. Video description (often contains complete ingredient lists)
+3. Video content (visual information)
+4. Webpage text (context)
 
-### Rezept-Webseiten (Blogs, Chefkoch, etc.)
+### Recipe Websites (Blogs, AllRecipes, etc.)
 
 ```
-URL empfangen
+URL received
     │
     ▼
 ┌─────────────────────────────┐
-│  HTML herunterladen         │
+│  Download HTML              │
 └─────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────┐
-│  JSON-LD Schema suchen      │  ← <script type="application/ld+json">
+│  Search for JSON-LD schema  │  ← <script type="application/ld+json">
 │  (@type: "Recipe")          │
 └─────────────────────────────┘
     │
-    ├── Schema gefunden ─────────────────────────────┐
-    │                                                 ▼
+    ├── Schema found ──────────────────────────────────┐
+    │                                                   ▼
     │                              ┌─────────────────────────────────┐
-    │                              │  Direkt parsen (ohne Gemini!)  │
+    │                              │  Parse directly (no Gemini!)   │
     │                              │                                 │
-    │                              │  Extrahiert:                    │
+    │                              │  Extracts:                      │
     │                              │  • recipeIngredient             │
     │                              │  • recipeInstructions           │
     │                              │  • prepTime, cookTime           │
-    │                              │  • recipeYield (Portionen)      │
+    │                              │  • recipeYield (servings)       │
     │                              │  • author, keywords             │
     │                              │                                 │
-    │                              │  → 90%+ Genauigkeit!            │
+    │                              │  → 90%+ accuracy!               │
     │                              └─────────────────────────────────┘
     │
-    └── Kein Schema ─────────────────────────────────┐
-                                                      ▼
+    └── No schema ─────────────────────────────────────┐
+                                                        ▼
                                    ┌─────────────────────────────────┐
-                                   │  Text extrahieren und an        │
-                                   │  Gemini senden                  │
+                                   │  Extract text and send to       │
+                                   │  Gemini                         │
                                    └─────────────────────────────────┘
 ```
 
-**Warum JSON-LD so gut ist:**
-Die meisten Rezept-Webseiten haben strukturierte Daten für Google/Pinterest. Diese sind bereits perfekt formatiert - keine KI-Interpretation nötig!
+**Why JSON-LD is so good:**
+Most recipe websites have structured data for Google/Pinterest. These are already perfectly formatted - no AI interpretation needed!
 
-### Bild/Screenshot
+### Image/Screenshot
 
 ```
-Bild empfangen
+Image received
     │
-    ├── Mit URL als Caption? ────────────────────────┐
-    │         │                                       ▼
+    ├── With URL as caption? ──────────────────────────┐
+    │         │                                         ▼
     │         │                    ┌─────────────────────────────────┐
-    │         │                    │  Webseiten-Text abrufen         │
+    │         │                    │  Fetch webpage text             │
     │         │                    └─────────────────────────────────┘
-    │         │                                       │
-    │         └───────────────────────────────────────┤
-    │                                                 ▼
+    │         │                                         │
+    │         └─────────────────────────────────────────┤
+    │                                                   ▼
     ▼                              ┌─────────────────────────────────┐
-┌─────────────────────────────┐    │  Bild + Webseiten-Text          │
-│  Nur Bild an Gemini         │    │  an Gemini senden               │
+┌─────────────────────────────┐    │  Send image + webpage text      │
+│  Only image to Gemini       │    │  to Gemini                      │
 └─────────────────────────────┘    └─────────────────────────────────┘
 ```
 
-### Video-Datei (direkt gesendet)
+### Video File (sent directly)
 
 ```
-Video empfangen (Telegram-Upload)
+Video received (Telegram upload)
     │
     ▼
 ┌─────────────────────────────┐
-│  Video an Gemini senden     │
+│  Send video to Gemini       │
 │                             │
-│  Keine Metadaten verfügbar! │
-│  Nur visuelle Analyse       │
+│  No metadata available!     │
+│  Visual analysis only       │
 └─────────────────────────────┘
 ```
 
-**Tipp:** Bei direkt gesendeten Videos fehlen Beschreibung/Untertitel. Wenn das Original-Video eine detaillierte Beschreibung hat, besser den Link senden!
+**Tip:** Directly sent videos lack description/subtitles. If the original video has a detailed description, better send the link!
 
-### Datenmodell
+### Data Model
 
-Jedes extrahierte Rezept enthält:
+Each extracted recipe contains:
 
-| Feld | Beschreibung | Quelle |
-|------|--------------|--------|
-| `title` | Rezeptname | Titel, Video, Bild |
-| `servings` | Portionen | Beschreibung, Schema |
-| `prep_time` | Vorbereitungszeit | Schema, Beschreibung |
-| `cook_time` | Kochzeit | Schema, Beschreibung |
-| `total_time` | Gesamtzeit | Schema, berechnet |
-| `difficulty` | einfach/mittel/schwer | Gemini-Einschätzung |
-| `tags` | Kategorien | Tags, Keywords, Schema |
-| `ingredients` | Zutatenliste mit Mengen | Alle Quellen |
-| `instructions` | Zubereitungsschritte | Alle Quellen |
-| `equipment` | Benötigte Geräte | Video, Beschreibung |
-| `notes` | Tipps, Variationen | Video, Beschreibung |
-| `source_url` | Original-URL | Input |
-| `source_platform` | tiktok/youtube/web/etc. | Erkannt aus URL |
-| `creator` | Video-Ersteller | Uploader-Metadaten |
+| Field | Description | Source |
+|-------|-------------|--------|
+| `title` | Recipe name | Title, Video, Image |
+| `servings` | Servings | Description, Schema |
+| `prep_time` | Preparation time | Schema, Description |
+| `cook_time` | Cooking time | Schema, Description |
+| `total_time` | Total time | Schema, calculated |
+| `difficulty` | easy/medium/hard | Gemini assessment |
+| `tags` | Categories | Tags, Keywords, Schema |
+| `ingredients` | Ingredient list with quantities | All sources |
+| `instructions` | Preparation steps | All sources |
+| `equipment` | Required equipment | Video, Description |
+| `notes` | Tips, variations | Video, Description |
+| `source_url` | Original URL | Input |
+| `source_platform` | tiktok/youtube/web/etc. | Detected from URL |
+| `creator` | Video creator | Uploader metadata |
 
-### Bekannte Einschränkungen
+### Known Limitations
 
-| Plattform | Status | Anmerkung |
-|-----------|--------|-----------|
-| **YouTube** | ✅ Gut | Video + Untertitel + Beschreibung |
-| **TikTok** | ⚠️ Eingeschränkt | Video-Download oft blockiert, Metadaten meist OK |
-| **Instagram** | ⚠️ Eingeschränkt | Erfordert oft Login, Metadaten limitiert |
-| **Facebook** | ⚠️ Eingeschränkt | Ähnlich wie Instagram |
-| **Rezept-Blogs** | ✅ Sehr gut | JSON-LD Schema = perfekte Daten |
-| **Pinterest** | ⚠️ Eingeschränkt | Leitet oft zu Original-Seite weiter |
+| Platform | Status | Note |
+|----------|--------|------|
+| **YouTube** | ✅ Good | Video + subtitles + description |
+| **TikTok** | ⚠️ Limited | Video download often blocked, metadata usually OK |
+| **Instagram** | ⚠️ Limited | Often requires login, limited metadata |
+| **Facebook** | ⚠️ Limited | Similar to Instagram |
+| **Recipe Blogs** | ✅ Very good | JSON-LD schema = perfect data |
+| **Pinterest** | ⚠️ Limited | Often redirects to original page |
 
-**Workaround bei Download-Problemen:**
-1. Video in der App herunterladen (TikTok: "Speichern", Instagram: Drittanbieter-App)
-2. Video direkt an den Bot senden
-3. Optional: Original-URL als Caption hinzufügen für Kontext
+**Workaround for download problems:**
+1. Download video in the app (TikTok: "Save", Instagram: third-party app)
+2. Send video directly to the bot
+3. Optional: Add original URL as caption for context
 
-## Bot-Befehle
+## Bot Commands
 
-- `/start` - Hilfe anzeigen
-- `/id` - Deine User-ID anzeigen
+- `/start` - Show help
+- `/id` - Show your user ID
 
-## Beispiel-Ausgabe
+## Example Output
 
 ```
 🍽 Spaghetti Carbonara
 
-⏱ 30 min | 👥 4 Portionen
-🏷 #italienisch #pasta #schnell
+⏱ 30 min | 👥 4 servings
+🏷 #italian #pasta #quick
 
-📋 Zutaten:
+📋 Ingredients:
 • 400g Spaghetti
 • 200g Guanciale
-• 4 Eigelb
+• 4 egg yolks
 • 100g Pecorino
 
-👨‍🍳 Zubereitung:
-1. Pasta in Salzwasser kochen
-2. Guanciale knusprig braten
-3. Eigelb mit Käse vermengen
-4. Alles zusammenführen
+👨‍🍳 Instructions:
+1. Cook pasta in salted water
+2. Fry guanciale until crispy
+3. Mix egg yolks with cheese
+4. Combine everything
 
-🔗 Quelle
+🔗 Source
 ```
 
-## Systemd-Service (für dauerhaften Betrieb)
+## Systemd Service (for persistent operation)
 
 ```ini
 # /etc/systemd/system/recipe-bot.service
@@ -387,62 +389,62 @@ sudo systemctl enable recipe-bot
 sudo systemctl start recipe-bot
 ```
 
-## Kosten
+## Costs
 
-- **Telegram Bot**: Kostenlos
-- **Gemini 1.5 Flash**: ~$0.00001 pro Rezept (praktisch kostenlos)
-- **Hosting**: Dein eigener Server/NAS/Raspberry Pi
+- **Telegram Bot**: Free
+- **Gemini 2.0 Flash**: ~$0.00001 per recipe (practically free)
+- **Hosting**: Your own server/NAS/Raspberry Pi
 
 ## Troubleshooting
 
-### "Download fehlgeschlagen"
+### "Download failed"
 
-TikTok und Instagram blockieren oft Downloads. Lösung:
-1. Video auf dem Handy herunterladen (mit TikTok-App oder Drittanbieter-App)
-2. Video direkt an den Bot senden
+TikTok and Instagram often block downloads. Solution:
+1. Download video on your phone (with TikTok app or third-party app)
+2. Send video directly to the bot
 
-### "Konnte keine Frames extrahieren"
+### "Could not extract frames"
 
-Stelle sicher dass `ffmpeg` installiert ist:
+Make sure `ffmpeg` is installed:
 ```bash
 # Ubuntu/Debian
 sudo apt install ffmpeg
 
-# Docker: Bereits enthalten
+# Docker: Already included
 ```
 
-### Bot antwortet nicht
+### Bot doesn't respond
 
-1. Prüfe ob deine User-ID in `allowed_users` steht
-2. Prüfe die Logs: `docker compose logs -f` oder Terminal
-3. Prüfe ob Bot-Token korrekt ist
+1. Check if your user ID is in `allowed_users`
+2. Check logs: `docker compose logs -f` or terminal
+3. Check if bot token is correct
 
-### Gemini-Fehler
+### Gemini Error
 
-1. Prüfe ob API-Key korrekt ist
-2. Prüfe Quota: https://aistudio.google.com/app/apikey
+1. Check if API key is correct
+2. Check quota: https://aistudio.google.com/app/apikey
 
-## Projektstruktur
+## Project Structure
 
 ```
 recipe-collector/
-├── bot.py              # Telegram Bot Hauptlogik
-├── extractor.py        # Gemini AI Integration
-├── media_handler.py    # Video/Bild-Verarbeitung
-├── config.py           # Konfiguration
-├── config.yaml.example
+├── bot.py              # Telegram bot main logic
+├── extractor.py        # Gemini AI integration
+├── config.py           # Configuration
+├── config.yaml.example # English config template
+├── config.yaml.de_example # German config template
 ├── requirements.txt
 ├── Dockerfile
 ├── docker-compose.yml
 └── README.md
 ```
 
-## Lizenz
+## License
 
 MIT
 
-## Ähnliche Projekte
+## Similar Projects
 
 - [Tandoor Recipes](https://github.com/TandoorRecipes/recipes) - Self-hosted Recipe Manager
 - [Mealie](https://github.com/mealie-recipes/mealie) - Self-hosted Recipe Manager
-- [Cooklang](https://cooklang.org/) - Markup-Sprache für Rezepte
+- [Cooklang](https://cooklang.org/) - Markup language for recipes
