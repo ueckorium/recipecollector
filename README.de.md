@@ -2,6 +2,8 @@
 
 🌐 *Deutsch | [English](README.md)*
 
+> **Hinweis:** Das ist ein kleines Vibe-Coding-Projekt von einem Vormittag. Es löst mein persönliches Problem und nichts weiter. Nutzung auf eigene Gefahr.
+
 Ein Telegram-Bot, der Kochrezepte aus Videos und Bildern extrahiert. Sende einfach ein TikTok-Video, Instagram-Reel oder ein Screenshot - der Bot liefert das formatierte Rezept zurück.
 
 ## Features
@@ -493,7 +495,7 @@ recipe-collector/
 
 ## Lizenz
 
-MIT
+CC0 (Public Domain)
 
 ## Ähnliche Projekte
 
